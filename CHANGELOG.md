@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 (2026-11-23)
+
+- build: 位级可复现打包（stage chmod + tar --mode 归一、size_bytes 收敛），二进制改嵌 manifest.json，消除同版本 sha 漂移
+
 ## 0.1.0 (2026-11-22)
 
 - feat: 新建 waf 插件骨架（M5 批3，depth_level=basic），复用 kore.plugin.v1 握手与会话循环
