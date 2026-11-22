@@ -1,0 +1,17 @@
+{
+  "id": "waf",
+  "name": "WAF 插件",
+  "version": "0.1.0",
+  "protocol": "kore.plugin.v1",
+  "lifecycle": "lazy",
+  "depth_level": "basic",
+  "entry": "bin/waf",
+  "capabilities": ["system:read"],
+  "triggers": [],
+  "requires_kore": ">=0.1.0 <0.2.0",
+  "resources": {"memory_mb": 6, "cpu_quota": "15%", "pids_max": 16},
+  "depends_on": [],
+  "conflicts": [],
+  "scenario_tags": ["sec"],
+  "size_bytes": 0
+}
