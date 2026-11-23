@@ -152,13 +152,13 @@ func (f *fakeEnv) env() Environment {
 // fakeRoot 记录 root-action 调用并返回预设结果。
 type fakeRoot struct {
 	calls  []string
-	handle func(actionID string, args []string) ([]byte, int, error)
+	handle func(actionID string, args []string) (RootActionOutput, error)
 }
 
-func (f *fakeRoot) Call(actionID string, args []string) ([]byte, int, error) {
+func (f *fakeRoot) Call(actionID string, args []string) (RootActionOutput, error) {
 	f.calls = append(f.calls, actionID+" "+strings.Join(args, " "))
 	if f.handle != nil {
 		return f.handle(actionID, args)
 	}
-	return nil, 0, nil
+	return RootActionOutput{ExitCode: 0}, nil
 }

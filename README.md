@@ -1,21 +1,26 @@
 # kore-plugin-waf
 
-WAF 管理插件（**L1.5 · 引擎无关 + 可降级**）：管理宿主**已安装**的 Web 应用防火墙规则与拦截日志。
-本仓**不内置任何 WAF 引擎**（与 nginx 同类裁决：引擎跟随宿主 / 站点插件安装），只做检测、读取、统计、模式切换与配置管理。
+WAF 管理插件（**L1.5+ · 引擎无关 + 真实 nft 数据面**）：
+两层职责分开——**引擎层**只读探测宿主已装的 WAF 引擎（modsecurity / naxsi / coraza / crowdsec）并统计规则、解析拦截日志；
+**数据面**由 kore 自己用 `nft` 落地（封禁集合 / SYN 扫描限速 / 单 IP 并发上限），支持 `observe`（只记录）与 `enforce`（阻断）切换。
+本仓**不内置任何 WAF 引擎**，也**不在插件进程里 exec nft**：一切写操作都经 ADR-0018 的 root-action 通道（ADR-0022 锁死命令形状）。
 
 - 协议：`kore.plugin.v1`，`lifecycle=lazy`，`depth_level=basic`
-- 能力：`system:read` + `system:admin`（`waf.toggle` / `waf.config.set` 按方法级 capability 走 admin）
-- 提权：声明 `requires_root: true` + 2 个 `root_actions`（ADR-0018），插件自身永不提权
+- 能力：`system:read` + `system:admin`（写方法 `waf.ban` / `waf.unban` / `waf.toggle` / `waf.config.set` 走 admin）
+- 提权：声明 `requires_root: true` + **12 个 `root_actions`**（全为 nft 语句，全部 `irreversible:false`——都能反向操作）
 - 场景标签：`sec`
 
-## 1. 方法面（5 个业务方法 + 配置契约）
+## 1. 方法面（7 个业务方法 + 配置契约）
 
 | 方法 | 入参 | 结果要点 |
 | --- | --- | --- |
-| `waf.status` | `{}` | `available / engine / version / rules_count / mode(on\|off\|detection) / error_code / hint / probed` |
-| `waf.rules` | `{engine?}` | `engine / available / rulesets[{name,path,rule_count,enabled}] / total` |
+| `waf.status` | `{}` | 引擎平面：`available / engine / version / rules_count / mode(on\|off\|detection) / probed`；数据面：`backend{tool,available,channel,table,chain,present,mode,banned_count,rules_count}` |
+| `waf.rules` | `{engine?}` | 引擎规则集 `rulesets[] / total` + 数据面 `nft{table,chain,present,mode,rules[{handle,summary,verdict,packets,bytes}],bans_count}` |
 | `waf.logs` | `{limit?, since?, rule_id?, engine?}` | `sources[] / entries[{time,ip,uri,rule_id,action}] / count / limit / scanned_lines` |
-| `waf.toggle` | `{mode, confirm?}` | `previous_mode / mode / applied / reloaded / steps[]`；无 root 通道时协议错误 `E_NEED_ROOT` |
+| `waf.toggle` | `{mode: observe\|enforce\|off, confirm?}` | `previous_mode / mode / applied / verified / rules[] / steps[]`；`off` 必须 `confirm=true` |
+| `waf.ban` | `{ip, ttl_s?, reason?}` | `ip / family / set / ttl_s / banned / steps[]`（幂等；`ttl_s=0` 永久，60–2592000） |
+| `waf.unban` | `{ip}` | `ip / set / removed / steps[]`（不在集合里也算成功） |
+| `waf.bans` | `{limit?}` | `present / mode / count / bans[{ip,timeout_s,expires_s,set}]` |
 | `waf.config.get` / `waf.config.set` | `{}` / `{values}` | 契约见 [docs/PLUGIN-CONFIG.md](https://github.com/pengtang1024/kore/blob/main/docs/PLUGIN-CONFIG.md)，字段见 §5 |
 
 `waf.<verb>` 与裸 `<verb>` 都接受；`waf.blockLog` 是 `waf.logs` 的兼容别名（0.1.x 客户端不炸）。
@@ -79,39 +84,56 @@ Apache 部署切换模式后需运维自行 `graceful`（`toggle` 结果会明�
 `KORE_WAF_MAX_LOG_BYTES`；列表变量接受 JSON 数组或逗号分隔。
 历史变量 `KORE_WAF_RULES_ROOT` 映射为规则目录（仅在未显式配置规则目录时生效）。
 
-## 6. 模式切换（root 动作，ADR-0018）
+## 6. 数据面：真实 nft 规则（root 动作，ADR-0018 / ADR-0022）
 
-`info.json` 声明：
+kore 在自己的命名空间里建一张表，**不碰宿主的 `filter` / `nat`**（内核形状校验要求 nft 表名 `kore_` 前缀）：
 
-| action | argv | 用途 |
-| --- | --- | --- |
-| `modsec-set-mode` | `/bin/sed -i.bak`（追加 `-e <表达式> <模式文件>`） | 改写 kore 管理的模式包含文件，`.bak` 保留上一版 |
-| `nginx-reload` | `nginx -s reload` | 使模式变更生效 |
-
-流程：参数校验 → 同模式短路（不提权）→ `mode=off` 必须 `confirm=true`（否则 `E_UNAUTHORIZED`）→
-无通道返回 `E_NEED_ROOT` + hint → 模式文件安全护栏（必须存在、≤64 KiB、**内容含 `SecRuleEngine`**，防止配置误指 `/etc/passwd` 被 sed 覆盖）→
-经通道写入 → **回读校验**（不把退出码 0 当成功）→ reload nginx。
-
-模式文件需要被引擎主配置 include（示例）：
-
-```apache
-# /etc/modsecurity/modsecurity.conf 末尾
-Include /etc/modsecurity/kore-mode.conf
+```
+table inet kore_waf            # 表
+  set banned4  { ipv4_addr; flags interval,timeout }   # 封禁集合（支持 CIDR 与临时封禁）
+  set banned6  { ipv6_addr; flags interval,timeout }
+  chain input  { type filter hook input priority -10; policy accept }
 ```
 
-`/etc/modsecurity/kore-mode.conf` 初始内容：`SecRuleEngine Off`（或 `On` / `DetectionOnly`）。
-`root_actions` 不标 `irreversible`：`sed -i.bak` 保留上一版可回滚、reload 可回滚；**关闭拦截**这一高风险动作由插件侧强制 `confirm` 把关。
-任何一步失败返回 `applied=false` + `error_code` + `steps[]`，不谎报"已生效"。
+基础防护四条规则（`enforce`）：
 
-## 7. 降级矩阵（无引擎 / 无权限）
+| 规则 | 作用 |
+| --- | --- |
+| `ip saddr @banned4 counter drop` | 命中封禁集合的 IPv4 丢包 |
+| `ip6 saddr @banned6 counter drop` | 命中封禁集合的 IPv6 丢包 |
+| `tcp flags syn tcp dport { 80, 443 } meter kore_syn4 { ip saddr limit rate over 60/second burst 120 packets } counter drop` | SYN 高频扫描限速（每源 IP 60/s，突发 120） |
+| `tcp dport { 80, 443 } ct count over 200 counter drop` | 单 IP 到 80/443 的并发连接上限 200 |
 
-| 场景 | status | rules | logs | toggle |
+`observe` 模式用同一组规则，但 verdict 换成 `counter log prefix kore-waf-*`（只计数 + 记日志，不阻断）。
+阈值写死在 `info.json` 的 argv 里（argv 变了 dist sha 就变），因此**不是运行期配置项**——改阈值等于发新版本。
+
+| action | 用途 |
+| --- | --- |
+| `nft-init-table` / `nft-init-set4` / `nft-init-set6` / `nft-init-chain` | 建表 / 集合 / base chain（`nft add` 对同定义幂等） |
+| `nft-mode-observe` / `nft-mode-enforce` | 清链后重装四条规则（幂等） |
+| `nft-flush` | 关闭防护：清链，保留表与封禁名单 |
+| `nft-ban4` / `nft-ban6` | 追加参数 `{ <ip> [timeout <时长>] }` 加入封禁集合 |
+| `nft-unban4` / `nft-unban6` | 追加参数 `{ <ip> }` 移除元素 |
+| `nft-list` | `nft -j list table inet kore_waf`，供状态与回读校验 |
+
+流程（`waf.toggle`）：参数/确认 → nft 与通道可用性 → 同模式短路（不提权）→ 必要时初始化 → 下发 → **回读校验**
+（模式与规则条数都要对上，否则 `applied=false` + 原因）。`waf.ban` 同样是「下发 → 回读集合确认元素在」，
+不把退出码 0 当成功。全部动作 `irreversible:false`：`enforce` 可回 `observe`/`off`，封禁可 `unban`。
+
+> 0.2.0 的 `modsec-set-mode`（`sed -i` 改模式文件）已**删除**：root 执行 `sed -i <任意表达式> <任意文件>`
+> 等于任意文件写、审计也看不懂改了什么（ADR-0022）。引擎自身的模式现在只**只读展示**（`waf.status`）。
+
+## 7. 降级矩阵（无引擎 / 无 nft / 无权限）
+
+| 场景 | status | rules | logs | toggle / ban |
 | --- | --- | --- | --- | --- |
-| 无任何引擎 | `available=false` + `E_UNSUPPORTED` + 安装 hint | 同左，`rulesets=[]` | 同左，`entries=[]` | 结构化 `available=false` + `E_UNSUPPORTED`（不是协议错误） |
-| 引擎存在但规则目录为空 | `available=true`、`rules_count=0` + hint | `available=true`、`total=0` + hint 让用户补规则目录 | 正常 | 按引擎能力 |
+| 无任何引擎 | 引擎平面 `available=false` + `E_UNSUPPORTED` + 安装 hint；数据面照常 | 引擎 `rulesets=[]`，数据面照常 | `entries=[]` + hint | 数据面照常（与引擎解耦） |
+| 无 `nft` | `backend.available=false` + 安装 hint | `nft.present=false` | 正常 | 结构化不可用（`applied=false` + hint），**不是协议错误** |
+| 有 nft、无 root 通道 | `backend.channel=false` + hint | 数据面 `present=false` | 正常 | 协议错误 `E_NEED_ROOT` + `detail.hint` |
+| 有通道、nft 版本不支持 meter/ct count | — | — | — | `E_UNSUPPORTED` + 原始 stderr（提示升级 nftables） |
+| 引擎存在但规则目录为空 | `available=true`、`rules_count=0` + hint | `total=0` + hint | 正常 | 数据面照常 |
 | 日志不可读（权限） | 正常 | 正常 | `E_NEED_ROOT` + hint | — |
-| 有引擎、切换需要 root 但无通道 | — | — | — | 协议错误 `E_NEED_ROOT` + `detail.hint` |
-| naxsi / crowdsec 请求切换模式 | — | — | — | 结构化 `E_UNSUPPORTED` + 在引擎配置里改的提示 |
+| 回读不一致（中间态） | — | — | — | `applied=false` + 「规则已下发但回读不一致」 |
 
 ## 8. 测试与已验证范围（诚实披露）
 
@@ -120,42 +142,36 @@ gofmt -l . && GOWORK=off go vet ./... && GOWORK=off go test -timeout 200s ./...
 make build && make dist
 ```
 
-覆盖：
+覆盖（**含真实 nft 数据面**）：
 
 | 层 | 文件 | 内容 |
 | --- | --- | --- |
 | 单元（mock 文件系统） | `internal/wafop/detect_test.go` | 四引擎检测、nginx -V 证据、版本/模式、显式引擎 + 配置目录认定、无引擎四证据 |
-| 单元（构造规则文件） | `internal/wafop/rules_test.go` | SecRule 计数（含缩进/注释）、配置目录优先、Naxsi、crowdsec JSON（键大小写不敏感）、无引擎降级 |
+| 单元（构造规则文件） | `internal/wafop/rules_test.go` | SecRule 计数（含缩进/注释）、配置目录优先、Naxsi、crowdsec JSON、无引擎降级 |
 | 单元（构造日志行） | `internal/wafop/logs_test.go` | ModSecurity 错误日志、审计日志分节、Naxsi、JSON、since/limit/rule_id、真实文件尾部截断、0000 权限 → `E_NEED_ROOT` |
-| 单元（降级/提权拒绝） | `internal/wafop/degrade_test.go`、`toggle_test.go` | 无引擎四方法、`E_NEED_ROOT` + hint、`E_UNAUTHORIZED`、模式文件护栏、回读校验、写入失败不谎报 |
+| **单元（nft 数据面）** | `internal/wafop/nft_test.go` | 有状态 nft 假后端：初始化幂等、模式下发+回读、回读不一致不谎报、v4/v6 封禁解封、TTL 校验、**真实 `nft -j` 输出 fixture 解析**（`testdata/nft-state-enforce.json` 由隔离 netns 采集）、通道缺失/内核拒绝/语法不支持的错误映射 |
+| 单元（方法面契约） | `internal/wafop/toggle_test.go` | `waf.toggle` 参数/确认/成功/回读；`waf.ban|unban|bans` 契约与参数校验 |
+| 单元（降级/提权拒绝） | `internal/wafop/degrade_test.go` | 无引擎四方法、`E_NEED_ROOT` + hint、`E_UNAUTHORIZED` |
 | 故障注入（四类） | `tests/fault/` | kill → `E_UPSTREAM`、timeout → `E_UPSTREAM`、disk → `E_INTERNAL`、cgroup → `E_UNSUPPORTED`；四方法逐一注入 |
-| 端到端（构造真实布局） | `e2e_constructed_test.go` | 真实文件结构 + 环境变量指向：env → config → 检测 → 模式 → 规则计数 5 → 日志解析 2 条 → `E_NEED_ROOT` |
+| 端到端（构造真实布局） | `e2e_constructed_test.go` | 真实文件结构 + 环境变量指向：env → config → 检测 → 规则计数 → 日志解析 → `E_NEED_ROOT` |
 | 配置契约 | `methods_test.go` | 默认值/source、0600 落盘、非法值不落盘不改内存、env 优先级、历史变量、热生效、reload |
+| **清单 schema + 内核形状表** | `rootactions_schema_test.go` + kore `pkg/pluginapi` 的 `TestWafPluginRootActionsCrossRepo` | info.json 的 12 条 root_actions 逐条过 `ValidateRootAction`；kore 侧跨仓测试再按 ADR-0022 形状表校验一遍（含追加参数样本） |
 
-**真实数据交叉验证（一次性，不随仓库提交）**：从上游 OWASP CRS `main` 下载
-`REQUEST-913/920/942` 三个真实规则文件（合计 176 KB），用插件同一实现统计：
-
-| 文件 | 朴素 `grep '^SecRule '` | 缩进感知 `grep -cE '^[[:space:]]*SecRule[[:space:]]'` | 本插件 |
-| --- | --- | --- | --- |
-| REQUEST-913 | 9 | 9 | 9 |
-| REQUEST-920 | 68 | 105 | 105 |
-| REQUEST-942 | 68 | 73 | 73 |
-| 合计 | 145 | 187 | **187** |
-
-结论：解析器与独立 grep 的缩进感知口径**逐文件一致**；朴素列首 grep 会少算 42 条（CRS 条件链缩进）。
+**真实 nft 验证（隔离 netns，不碰宿主）**：用 `unshare -rn` 起独立网络命名空间，按 `info.json` 的声明 argv
+逐条驱动真实 nft（1.1.6）：建表/集合/链 → 临时与永久封禁 → 重复封禁幂等 → `enforce` 四条 drop 规则 →
+`observe` 四条 log-only 规则 → 解封（含解封不存在元素 exit 1）→ `nft-flush` 清链（集合保留）→ `nft -j` JSON 快照。
+宿主侧 `nft list ruleset` / `iptables -S` / `ufw status` 三项 sha256 前后一致、`kore_waf` 不出现在宿主表清单里。
 
 **未验证 / 明确不假装**：
 
-1. 本机**没有任何运行中的 WAF 引擎**（无 modsecurity/naxsi/coraza/crowdsec、无 nginx），
-   引擎检测与解析用构造文件 + 上游真实 CRS 规则文件验证，**未对接运行引擎**。
-2. 尝试 `docker pull owasp/modsecurity-crs:4-nginx-alpine` 验证真实发行版布局，本机镜像源不可用（拉取失败），
-   故没有"真实引擎/真实发行版布局"的运行时证据。
-3. `waf.toggle` 的**成功路径未在真 root + 真引擎下验证**：
-   - 本机非 root（uid=1000、无有效 capability、`NoNewPrivs=1`）且无运行引擎 → 只验证了拒绝路径
-     （`E_NEED_ROOT` / `E_UNAUTHORIZED`）与单测里的模拟通道成功路径；
-   - 内核侧 root-action 通道已具备并装配插件 bearer 鉴权（`cmd/kored/serve_boot.go` 的 `PluginAuth`），
-     但本机 `systemd-run --uid=0` 被 polkit 拒绝，无法完成端到端提权实测——需真 root + 真引擎联调后复验。
-4. 深层 include 链、Apache modsecurity 的 reload、crowdsec 日志解析、规则启用/停用的真实生效性均未覆盖。
+1. 本机**没有任何运行中的 WAF 引擎**（无 modsecurity/naxsi/coraza/crowdsec、无 nginx），引擎平面仍是"构造文件 + 上游真实 CRS 规则文件"验证。
+2. **`ipset` 后端未实现**：本机无 `ipset` 二进制，无法做真实验证；kore 的形状表已按固定形状放开 `ipset`
+   （`create/add/del/test/list/destroy`），但插件当前只用 nft。接 ipset 前必须先补隔离验证。
+3. **未在真 root kored 下跑完端到端**：本会话以非 root 用户运行，root-action 通道的拒绝路径（`E_NEED_ROOT`）已验证，
+   成功路径的**内核侧**由 kore `internal/core/privilege` 的 root 集成测试覆盖（需 root 环境才执行，否则 skip）；
+   插件侧 nft 命令的真实性由上面的 netns 验证覆盖。二者拼起来才等于"真 root 端到端"，本轮未在同一进程链里跑通。
+4. nft 版本兼容只验证了 1.1.6；老版本缺 `meter` / `ct count` 时按 `E_UNSUPPORTED` + 原始 stderr 降级（未逐一实测旧版本）。
+5. `observe` 模式的日志前缀（`kore-waf-*`）用 `nft log` 落到内核日志，本插件**不解析内核日志**（只解析引擎日志）——观察数据需配 `journalctl -k` 查看，这是已知边界。
 
 ## 9. 打包与可复现
 
@@ -164,4 +180,5 @@ make build && make dist
 
 ## 10. 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)：`0.2.0` 去 noop（引擎检测 / 规则统计 / 日志解析 / 模式切换 / 配置契约）。
+见 [CHANGELOG.md](CHANGELOG.md)：`0.3.0` 接真实 nft 数据面（封禁集合 / 基础防护 / observe·enforce 切换，删除 sed 写入口）；
+`0.2.0` 去 noop（引擎检测 / 规则统计 / 日志解析 / 配置契约）。

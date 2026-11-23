@@ -110,19 +110,23 @@ type Detection struct {
 }
 
 // StatusResult 是 waf.status 的结果。
+//
+// 两个平面分开报：engine 是宿主已装的 WAF 引擎（modsecurity/naxsi/…，只读探测），
+// backend 是 kore 自己用 nft 落的封禁数据面（可写，经 root-action 通道）。
 type StatusResult struct {
-	Available     bool    `json:"available"`
-	Engine        string  `json:"engine"`
-	Version       string  `json:"version,omitempty"`
-	VersionSource string  `json:"version_source,omitempty"`
-	RulesCount    int     `json:"rules_count"`
-	Mode          string  `json:"mode"`
-	ModeSource    string  `json:"mode_source,omitempty"`
-	CRSVersion    string  `json:"crs_version,omitempty"`
-	ErrorCode     string  `json:"error_code,omitempty"`
-	Hint          string  `json:"hint,omitempty"`
-	RequiresRoot  bool    `json:"requires_root"`
-	Probed        []Probe `json:"probed,omitempty"`
+	Available     bool          `json:"available"`
+	Engine        string        `json:"engine"`
+	Version       string        `json:"version,omitempty"`
+	VersionSource string        `json:"version_source,omitempty"`
+	RulesCount    int           `json:"rules_count"`
+	Mode          string        `json:"mode"`
+	ModeSource    string        `json:"mode_source,omitempty"`
+	CRSVersion    string        `json:"crs_version,omitempty"`
+	ErrorCode     string        `json:"error_code,omitempty"`
+	Hint          string        `json:"hint,omitempty"`
+	RequiresRoot  bool          `json:"requires_root"`
+	Probed        []Probe       `json:"probed,omitempty"`
+	Backend       StatusBackend `json:"backend"`
 }
 
 // RuleSet 是一个规则集（通常对应一个 .conf / .rules 文件，crowdsec 下对应一个场景）。
@@ -133,14 +137,16 @@ type RuleSet struct {
 	Enabled   bool   `json:"enabled"`
 }
 
-// RulesResult 是 waf.rules 的结果。
+// RulesResult 是 waf.rules 的结果：engine 是宿主引擎的规则集，nft 是 kore 自有的
+// 基础防护规则（封禁集合 / SYN 限速 / 并发连接上限）。
 type RulesResult struct {
-	Engine    string    `json:"engine"`
-	Available bool      `json:"available"`
-	ErrorCode string    `json:"error_code,omitempty"`
-	Hint      string    `json:"hint,omitempty"`
-	RuleSets  []RuleSet `json:"rulesets"`
-	Total     int       `json:"total"`
+	Engine    string     `json:"engine"`
+	Available bool       `json:"available"`
+	ErrorCode string     `json:"error_code,omitempty"`
+	Hint      string     `json:"hint,omitempty"`
+	RuleSets  []RuleSet  `json:"rulesets"`
+	Total     int        `json:"total"`
+	Nft       NftRuleset `json:"nft"`
 }
 
 // LogSource 是一份日志文件的读取情况（只读尾部）。
@@ -184,36 +190,21 @@ type LogsResult struct {
 	SkippedUnparsed int         `json:"skipped_unparsed"`
 }
 
-// ToggleParams 是 waf.toggle 的入参。confirm 只对「关闭拦截」强制要求。
-type ToggleParams struct {
-	Mode    string `json:"mode"`
-	Confirm bool   `json:"confirm"`
-}
-
-// ToggleStep 是一步 root-action 的执行结果。
-type ToggleStep struct {
-	Action   string `json:"action"`
-	ExitCode int    `json:"exit_code"`
-	OK       bool   `json:"ok"`
-	Error    string `json:"error,omitempty"`
-}
-
-// ToggleResult 是 waf.toggle 的结果；applied 表示模式文件已写入且已完成 reload。
-type ToggleResult struct {
-	Engine       string       `json:"engine"`
-	Mode         string       `json:"mode"`
-	PreviousMode string       `json:"previous_mode"`
-	Applied      bool         `json:"applied"`
-	Reloaded     bool         `json:"reloaded"`
-	Available    bool         `json:"available"`
-	ErrorCode    string       `json:"error_code,omitempty"`
-	Hint         string       `json:"hint,omitempty"`
-	Steps        []ToggleStep `json:"steps"`
-}
-
 // RootActionFunc 是插件→内核 root-action 通道的调用面（ADR-0018）。
-// 返回 stdout、退出码与错误；错误可为 *ChannelError 或注入的 *FaultError。
-type RootActionFunc func(actionID string, args []string) (stdout []byte, exitCode int, err error)
+//
+// 返回结构化输出（stdout/stderr/退出码）与错误；错误可为 *ChannelError（内核拒绝，
+// 带协议错误码与 hint）或注入的 *FaultError。**退出码非 0 不是 error**——那是命令
+// 自己的结果（例如 nft 在对象不存在时退出 1），由调用方按语义判断。
+type RootActionFunc func(actionID string, args []string) (RootActionOutput, error)
+
+// RootActionOutput 是一次 root-action 的执行输出（内核 privilege.Result 的子集）。
+type RootActionOutput struct {
+	// Stdout / Stderr 是 unit 的输出（内核各截断到 1 MiB）。
+	Stdout []byte
+	Stderr []byte
+	// ExitCode 是 systemd-run --wait 透传的退出码；-1 表示未执行或超时。
+	ExitCode int
+}
 
 // ChannelError 是内核 root-action 通道返回的结构化拒绝（错误码 + 可操作提示）。
 type ChannelError struct {

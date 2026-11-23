@@ -3,177 +3,105 @@ package wafop
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/pengtang1024/kore/pkg/pluginapi"
 )
 
-// 模式切换用到的 root_actions（info.json 里声明的 id 必须与这里一致）。
-const (
-	// ActionSetMode 写入 kore 管理的模式包含文件（固定 argv + 追加 sed 参数）。
-	ActionSetMode = "modsec-set-mode"
-	// ActionReloadNginx 重载 nginx 让模式变更生效。
-	ActionReloadNginx = "nginx-reload"
-)
-
-// Toggle 切换 WAF 运行模式。
+// kore 数据面的模式切换（0.3.0 起）。历史实现经 `sed -i` 改 ModSecurity 的模式包含
+// 文件——那等于以 root 执行「任意表达式 + 任意文件」，审计里也看不出改了什么；
+// 见 ADR-0022。现在模式 = **nft 规则集形态**：
 //
-// 决策顺序（每一步都可解释）：
-//  1. 未检测到引擎 → 结构化 E_UNSUPPORTED（不是协议错误，UI 仍能展示原因）；
-//  2. 目标模式与当前一致 → applied=true，不执行任何提权动作；
-//  3. 引擎不支持运行时切换（naxsi / crowdsec）→ 结构化 E_UNSUPPORTED + hint；
-//  4. 关闭拦截（mode=off）必须显式 confirm，否则 E_UNAUTHORIZED；
-//  5. 没有 root-action 通道 → E_NEED_ROOT + hint（ADR-0018 降级硬要求）；
-//  6. 模式包含文件不存在/不含 SecRuleEngine → 结构化 E_UNSUPPORTED + 怎么修；
-//  7. 经通道写入并回读校验，再 reload nginx；任何一步失败都如实 applied=false。
-func Toggle(env Environment, settings Settings, params ToggleParams, root RootActionFunc) (ToggleResult, *pluginapi.Error) {
-	env = defaultEnvironment(env)
-	s := settings.normalized()
-	detection, err := Detect(env, s)
+//	observe：命中规则只 counter log，不阻断（看日志验证规则是否误伤）
+//	enforce：命中规则 counter drop（真正阻断）
+//	off    ：清空链（不删表/集合，封禁名单保留，重新 enforce 立即生效）
+
+// ToggleParams 是 waf.toggle 的入参。confirm 只对「关闭防护」强制要求。
+type ToggleParams struct {
+	// Mode 目标模式：observe | enforce | off。
+	Mode string `json:"mode"`
+	// Confirm 关闭防护（mode=off）时必须为 true。
+	Confirm bool `json:"confirm"`
+}
+
+// Toggle 切换数据面模式：observe / enforce 重装规则集，off 清空链。
+//
+// 顺序：参数/确认 → 工具与通道可用性 → 幂等短路 → 下发 → **回读校验**。
+// 任一步失败都如实返回 applied=false，不把「命令退出 0」当成「模式已生效」。
+func Toggle(env Environment, params ToggleParams, root RootActionFunc) (ModeResult, *pluginapi.Error) {
+	mode, perr := checkDataPlaneMode(params.Mode)
+	if perr != nil {
+		return ModeResult{}, perr
+	}
+	if mode == ModeOff && !params.Confirm {
+		return ModeResult{}, unauthorized("关闭防护会放开全部流量（封禁名单保留但不生效）",
+			"确认关闭请带 confirm=true 重试；只想观察不阻断请用 mode=observe")
+	}
+	backend := NewNftBackend(env, root)
+	availability := backend.Availability()
+	if !availability.Available {
+		// 工具缺失属于「环境不支持」，返回结构化不可用（不报协议错误）。
+		return ModeResult{Mode: mode, Rules: []NftRule{}, Steps: []NftStep{},
+			Hint: availability.Hint}, nil
+	}
+	result, err := backend.ApplyMode(mode)
 	if err != nil {
-		return ToggleResult{}, classify(err)
+		return result, classifyToggleChannel(err)
 	}
-	result := ToggleResult{
-		Engine: detection.Engine, Mode: detection.Mode, PreviousMode: detection.Mode,
-		Available: detection.Found, Steps: []ToggleStep{},
-	}
-	if !detection.Found {
-		result.ErrorCode = pluginapi.E_UNSUPPORTED
-		result.Hint = installHint()
-		return result, nil
-	}
-	if params.Mode == detection.Mode {
-		result.Applied = true
-		result.Hint = "当前已是 " + params.Mode + " 模式，未执行任何提权动作"
-		return result, nil
-	}
-	if detection.Engine != EngineModSecurity && detection.Engine != EngineCoraza {
-		result.ErrorCode = pluginapi.E_UNSUPPORTED
-		result.Hint = detection.Engine + " 不支持运行时模式切换；请在引擎自身配置中修改（naxsi: SecRulesEnabled / LearningMode，crowdsec: 启停 bouncer）"
-		return result, nil
-	}
-	if params.Mode == ModeOff && !params.Confirm {
-		return ToggleResult{}, unauthorized("关闭拦截会放开全部流量，需要显式确认",
-			"确认关闭请带 confirm=true 重试；建议先用 mode=detection 观察")
-	}
-	if root == nil {
-		return ToggleResult{}, needRoot("切换 WAF 模式需要 root 权限，但插件没有可用的 root-action 通道",
-			rootActionHint(detection.Engine))
-	}
-	modePath := modeConfigPath(s, detection.Engine)
-	if problem, err := modeFileProblem(env, modePath); err != nil {
-		return ToggleResult{}, classify(err)
-	} else if problem != "" {
-		result.ErrorCode = pluginapi.E_UNSUPPORTED
-		result.Hint = problem
-		return result, nil
-	}
-	expression := sedExpression(params.Mode)
-	stdout, exitCode, err := root(ActionSetMode, []string{"-e", expression, modePath})
-	if err != nil {
-		return ToggleResult{}, classifyToggleChannel(err)
-	}
-	step := ToggleStep{Action: ActionSetMode, ExitCode: exitCode, OK: exitCode == 0}
-	if exitCode != 0 {
-		step.Error = trimLine(stdout, 200)
-		result.Steps = append(result.Steps, step)
-		result.ErrorCode = pluginapi.E_UPSTREAM
-		result.Hint = "写入模式文件失败（退出码 " + fmt.Sprint(exitCode) + "）：" + step.Error
-		return result, nil
-	}
-	result.Steps = append(result.Steps, step)
-	// 回读校验：不把「命令退出 0」当成「模式已改」，以文件实际内容为准。
-	if actual, _, err := scanSecRuleEngine(env, []string{modePath}); err != nil {
-		return ToggleResult{}, classify(err)
-	} else if actual != params.Mode {
-		result.ErrorCode = pluginapi.E_UPSTREAM
-		result.Hint = "模式文件写入后回读为 " + actual + "，期望 " + params.Mode + "；未完成切换"
-		return result, nil
-	}
-	if _, ok := env.LookPath("nginx"); !ok {
-		result.Mode = params.Mode
-		result.Applied = true
-		result.Hint = "模式文件已写入；未检测到 nginx，跳过 reload（Apache 部署请手动 graceful）"
-		return result, nil
-	}
-	stdout, exitCode, err = root(ActionReloadNginx, nil)
-	if err != nil {
-		return ToggleResult{}, classifyToggleChannel(err)
-	}
-	reloadStep := ToggleStep{Action: ActionReloadNginx, ExitCode: exitCode, OK: exitCode == 0}
-	if exitCode != 0 {
-		reloadStep.Error = trimLine(stdout, 200)
-		result.Steps = append(result.Steps, reloadStep)
-		result.ErrorCode = pluginapi.E_UPSTREAM
-		result.Hint = "模式文件已写入，但 nginx reload 失败（退出码 " + fmt.Sprint(exitCode) + "）：" +
-			reloadStep.Error + "；变更尚未生效"
-		return result, nil
-	}
-	result.Steps = append(result.Steps, reloadStep)
-	result.Mode = params.Mode
-	result.Applied = true
-	result.Reloaded = true
 	return result, nil
 }
 
-// modeFileProblem 检查模式包含文件是否可安全改写；返回非空提示表示不可用。
-//
-// 安全护栏：只允许改写「内容里已经有 SecRuleEngine 指令」的普通文件，
-// 防止配置被误指到 /etc/passwd 之类无关文件后被 sed 覆盖。
-func modeFileProblem(env Environment, path string) (string, error) {
-	meta, err := env.Stat(path)
-	if err != nil {
-		if isFault(err) {
-			return "", err
-		}
-		if isNotExist(err) {
-			return "模式包含文件 " + path + " 不存在。请创建该文件并写入 `SecRuleEngine Off`，" +
-				"再在引擎主配置里加 `Include " + path + "`（该 Include 需在其它 SecRuleEngine 之后）", nil
-		}
-		if isPermission(err) {
-			return "无权访问模式包含文件 " + path + "：" + rootActionHint(""), nil
-		}
-		return "无法访问模式包含文件 " + path + "：" + err.Error(), nil
+// checkDataPlaneMode 校验 mode 取值。
+func checkDataPlaneMode(raw string) (string, *pluginapi.Error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "":
+		return "", invalid("缺少必填参数 mode，可选：observe / enforce / off")
+	case ModeObserve, ModeEnforce, ModeOff:
+		return value, nil
 	}
-	if meta.IsDir {
-		return "模式包含文件 " + path + " 是目录，不是文件", nil
-	}
-	if meta.Size > 64<<10 {
-		return "模式包含文件 " + path + " 超过 64 KiB，拒绝改写（防止误指到日志/数据库文件）", nil
-	}
-	data, err := env.ReadFile(path)
-	if err != nil {
-		if isFault(err) {
-			return "", err
-		}
-		return "无法读取模式包含文件 " + path + "：" + err.Error(), nil
-	}
-	if !secRuleEngineRe.Match(data) {
-		return "模式包含文件 " + path + " 不含 SecRuleEngine 指令，拒绝改写（防止误覆盖无关文件）；" +
-			"请先写入一行 `SecRuleEngine Off` 并在引擎配置里 Include 它", nil
-	}
-	return "", nil
+	return "", invalid("mode=" + raw + " 非法，可选：observe / enforce / off")
 }
 
-// sedExpression 生成幂等的模式写入表达式：把文件内所有 SecRuleEngine 行改成目标值。
-func sedExpression(mode string) string {
-	value := "Off"
-	switch mode {
-	case ModeOn:
-		value = "On"
-	case ModeDetection:
-		value = "DetectionOnly"
+// Status 汇总数据面状态：nft 可用性 + 表状态 + 模式 + 封禁数 + 规则数。
+func Status(env Environment, root RootActionFunc) StatusBackend {
+	backend := NewNftBackend(env, root)
+	availability := backend.Availability()
+	status := StatusBackend{
+		Tool: availability.Tool, Available: availability.Available, Channel: availability.Channel,
+		Table: NftTable, Chain: NftChain, Mode: ModeOff,
 	}
-	return "s/^[[:space:]]*SecRuleEngine[[:space:]].*/SecRuleEngine " + value + "/"
+	status.Reason, status.Hint = availability.Reason, availability.Hint
+	if !availability.Available || root == nil {
+		return status
+	}
+	state, err := backend.State()
+	if err != nil {
+		var protocolErr *pluginapi.Error
+		if errors.As(err, &protocolErr) {
+			status.Reason = protocolErr.Message
+			status.Hint = string(protocolErr.Detail)
+			return status
+		}
+		status.Reason = err.Error()
+		return status
+	}
+	status.Present = state.Present
+	status.Mode = state.Mode
+	status.Banned = len(state.Bans)
+	status.RulesCount = len(state.Rules)
+	if !state.Present {
+		status.Hint = "数据面尚未初始化：调用 waf.toggle（mode=observe|enforce）或 waf.ban 会自动建表"
+	}
+	return status
 }
 
-// rootActionHint 是「下一步怎么做」的可操作提示（ADR-0018 降级硬要求）。
-func rootActionHint(engine string) string {
+// RootActionHint 是「下一步怎么做」的可操作提示（ADR-0018 降级硬要求）。
+func rootActionHint(scope string) string {
 	hint := "需 root 权限：请用 sudo/systemd 启动 kored（或在 systemd unit 里配置提权），" +
-		"由内核经 ADR-0018 的 root-action 通道执行 " + ActionSetMode + " / " + ActionReloadNginx
-	if engine != "" {
-		hint += "；当前引擎=" + engine
+		"由内核经 ADR-0018 的 root-action 通道执行 nft 动作"
+	if scope != "" {
+		hint += "（当前：" + scope + "）"
 	}
 	return hint
 }
@@ -207,7 +135,7 @@ func detailHint(hint string) json.RawMessage {
 	return data
 }
 
-// classifyToggleChannel 把通道错误映射为协议错误：内核明确拒绝的码原样透传，
+// classifyToggleChannel 把通道/命令错误映射为协议错误：内核明确拒绝的码原样透传，
 // 其余归 E_UPSTREAM；注入故障走统一 classify。
 func classifyToggleChannel(err error) *pluginapi.Error {
 	var channel *ChannelError
@@ -222,6 +150,10 @@ func classifyToggleChannel(err error) *pluginapi.Error {
 			}
 		}
 		return upstream("root-action 通道失败: " + channel.Message + hintSuffix(channel.Hint))
+	}
+	var commandErr *NftCommandError
+	if errors.As(err, &commandErr) {
+		return upstream(commandErr.Error())
 	}
 	return classify(err)
 }

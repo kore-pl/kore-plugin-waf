@@ -55,15 +55,17 @@ func TestNoEngineDegradation(t *testing.T) {
 		t.Fatalf("logs 降级字段不正确: %+v", logs)
 	}
 
-	toggleRaw, perr := runtime.Call("waf.toggle", json.RawMessage(`{"mode":"on"}`))
+	// 数据面（nft）与引擎无关：无引擎时 toggle 走结构化不可用（缺 nft / 缺通道），
+	// 不报协议错误，也不谎报 applied。
+	toggleRaw, perr := runtime.Call("waf.toggle", json.RawMessage(`{"mode":"enforce"}`))
 	if perr != nil {
 		t.Fatalf("无引擎时 toggle 不应报协议错误: %v", perr)
 	}
-	var toggle ToggleResult
+	var toggle ModeResult
 	if err := json.Unmarshal(toggleRaw, &toggle); err != nil {
 		t.Fatalf("解析 toggle: %v", err)
 	}
-	if toggle.Applied || toggle.Available || toggle.ErrorCode != pluginapi.E_UNSUPPORTED || toggle.Hint == "" {
+	if toggle.Applied || toggle.Hint == "" || toggle.Mode != "enforce" {
 		t.Fatalf("toggle 降级字段不正确: %+v", toggle)
 	}
 }

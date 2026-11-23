@@ -35,7 +35,6 @@ func TestDispatchMethodsNoEngine(t *testing.T) {
 		{"waf.status", `{}`, []string{`"available":false`, `"engine":"none"`, `"error_code":"E_UNSUPPORTED"`, `"requires_root":true`}},
 		{"waf.rules", `{}`, []string{`"available":false`, `"error_code":"E_UNSUPPORTED"`, `"rulesets":[]`}},
 		{"waf.logs", `{"limit":7}`, []string{`"available":false`, `"error_code":"E_UNSUPPORTED"`, `"limit":7`}},
-		{"waf.toggle", `{"mode":"on"}`, []string{`"available":false`, `"applied":false`, `"error_code":"E_UNSUPPORTED"`}},
 	}
 	for _, c := range cases {
 		response := dispatchOnce(t, cfg, c.method, c.params)
@@ -47,6 +46,18 @@ func TestDispatchMethodsNoEngine(t *testing.T) {
 				t.Fatalf("%s 结果=%s，未含 %q", c.method, response.Result, want)
 			}
 		}
+	}
+	// 0.3.0 起 toggle 的 mode 是数据面（nft）模式，与引擎探测解耦：
+	//   - 本机无 nft → 结构化不可用（applied=false + 安装 hint，不报协议错误）；
+	//   - 有 nft 但无 root 通道 → E_NEED_ROOT + hint（ADR-0018 降级硬要求）。
+	toggle := dispatchOnce(t, cfg, "waf.toggle", `{"mode":"enforce"}`)
+	if toggle.Error == nil {
+		if !strings.Contains(string(toggle.Result), `"applied":false`) ||
+			!strings.Contains(string(toggle.Result), `"hint":`) {
+			t.Fatalf("无 nft 时应返回结构化不可用: %s", toggle.Result)
+		}
+	} else if toggle.Error.Code != "E_NEED_ROOT" {
+		t.Fatalf("有 nft 无通道应 E_NEED_ROOT，实际 %v", toggle.Error)
 	}
 }
 

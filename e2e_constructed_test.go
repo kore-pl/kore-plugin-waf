@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -148,7 +149,10 @@ func TestConstructedEngineLayout(t *testing.T) {
 	}
 
 	// 4) toggle：无 root-action 通道 → E_NEED_ROOT（不是静默成功）。
-	if _, perr := cfg.runtime.Call("waf.toggle", []byte(`{"mode":"detection"}`)); perr == nil || perr.Code != "E_NEED_ROOT" {
+	//    前提：本机装了 nft（否则是结构化「工具缺失」而不是通道拒绝）。
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Log("本机无 nft，跳过 E_NEED_ROOT 断言（工具缺失优先于通道缺失）")
+	} else if _, perr := cfg.runtime.Call("waf.toggle", []byte(`{"mode":"enforce"}`)); perr == nil || perr.Code != "E_NEED_ROOT" {
 		t.Fatalf("无通道应 E_NEED_ROOT，实际 %v", perr)
 	}
 	if _, perr := cfg.runtime.Call("waf.toggle", []byte(`{"mode":"off"}`)); perr == nil || perr.Code != pluginapi.E_UNAUTHORIZED {

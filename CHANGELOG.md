@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 (2026-11-23)
+
+从「引擎无关管理」升级为**真实 nft 数据面**（L1.5 → L2 方向），并删除危险的 `sed` 写入口。
+
+- feat: **nft 数据面**——kore 自有 `table inet kore_waf`（`banned4`/`banned6` 封禁集合 + 挂在 input 的 base chain），
+  基础防护四条规则：封禁集合 drop、IPv6 封禁、SYN 高频扫描限速（每源 60/s 突发 120）、单 IP 并发连接上限 200
+- feat: `waf.toggle {mode: observe|enforce|off}` 重写——模式 = **规则集形态**：observe 只 `counter log` 不阻断，
+  enforce `counter drop`，off 清链（保留表与封禁名单）；下发后**回读校验**模式与规则条数，不一致 `applied=false`
+- feat: `waf.ban {ip, ttl_s?, reason?}` / `waf.unban {ip}` / `waf.bans {limit?}`——IP/CIDR 封禁走 nft 集合，
+  临时封禁用集合 `timeout` 标志；全部幂等（重复封禁、解封不存在元素都不报错），写入后回读确认
+- feat: `waf.status` 增 `backend{tool,available,channel,table,chain,present,mode,banned_count,rules_count}`——
+  引擎平面（只读探测）与数据面（可写）分开报；`waf.rules` 增 `nft{...rules,bans}` 展示真实规则与计数器
+- **fix(security)**: 删除 `modsec-set-mode`（`/bin/sed -i` 改模式文件）与 `nginx-reload` 两个 root 动作。
+  前者以 root 执行「任意 sed 表达式 + 任意文件路径」= 任意文件写，审计也看不出改了什么；
+  引擎模式现在只做只读展示。对应内核侧 ADR-0022（命令 + 子命令 + 参数形状三级校验）
+- feat: `info.json` 改为 **12 条 nft root_actions**（init table/set4/set6/chain、mode observe/enforce、flush、
+  ban4/ban6、unban4/unban6、list），全部 `irreversible:false`（都能反向操作）；`method_capabilities`
+  补全 7 个业务方法（读 `system:read`，`ban`/`unban`/`toggle`/`config.set` 为 `system:admin`）
+- refactor: `RootActionFunc` 返回结构化 `RootActionOutput{stdout,stderr,exit_code}`——退出码非 0 是命令结果而非
+  协议错误，`waf.toggle` 能据此区分「对象不存在」「语法不支持」「权限拒绝」
+- test: nft 假后端（有状态）+ 真实 `nft -j` 输出 fixture（隔离 netns 采集）+ 方法面契约；故障注入四类覆盖新方法
+- build: 版本 0.2.0 → 0.3.0（feat + 破坏性方法语义变更 → minor）
+
+**已验证 / 未验证（诚实披露）**：真实 nft（1.1.6）在 `unshare -rn` 隔离 netns 里按 info.json 的声明 argv 跑通
+建表/集合/链 → 封禁（v4/v6/超时）→ enforce/observe 切换 → 解封 → 清链 → JSON 快照，宿主
+`nft list ruleset` / `iptables -S` / `ufw status` 前后 sha256 一致；未在真 root kored 下完成端到端（本会话非 root），
+`ipset` 后端未实现（本机无 ipset 二进制），引擎平面仍无运行中的真实引擎。详见 README §8。
+
 ## 0.2.0 (2026-11-23)
 
 去 noop：从「结构化占位」升级为**引擎无关 + 可降级**的真实 WAF 管理（L1.5）。

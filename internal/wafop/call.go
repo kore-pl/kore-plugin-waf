@@ -3,7 +3,9 @@ package wafop
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/pengtang1024/kore/pkg/pluginapi"
 )
@@ -58,6 +60,12 @@ func (r *Runtime) Call(method string, params json.RawMessage) (json.RawMessage, 
 		return r.callLogs(params)
 	case "toggle":
 		return r.callToggle(params)
+	case "ban":
+		return r.callBan(params)
+	case "unban":
+		return r.callUnban(params)
+	case "bans":
+		return r.callBans(params)
 	}
 	return nil, errNotFound(method)
 }
@@ -66,7 +74,7 @@ func (r *Runtime) Call(method string, params json.RawMessage) (json.RawMessage, 
 func businessVerb(method string) (string, bool) {
 	verb := strings.TrimPrefix(method, "waf.")
 	switch verb {
-	case "status", "rules", "logs", "blockLog", "toggle":
+	case "status", "rules", "logs", "blockLog", "toggle", "ban", "unban", "bans":
 		if verb == "blockLog" {
 			return "logs", true
 		}
@@ -91,10 +99,21 @@ type logsParams struct {
 	Engine string `json:"engine"`
 }
 
-// toggleParams 是 waf.toggle 的入参。
-type toggleParams struct {
-	Mode    string `json:"mode"`
-	Confirm bool   `json:"confirm"`
+// banParams 是 waf.ban 的入参。
+type banParams struct {
+	IP     string `json:"ip"`
+	TTLS   int    `json:"ttl_s"`
+	Reason string `json:"reason"`
+}
+
+// unbanParams 是 waf.unban 的入参。
+type unbanParams struct {
+	IP string `json:"ip"`
+}
+
+// bansParams 是 waf.bans 的入参。
+type bansParams struct {
+	Limit int `json:"limit"`
 }
 
 // callStatus 组装状态：引擎 + 版本 + 模式 + 规则条数 + 降级提示。
@@ -122,10 +141,14 @@ func (r *Runtime) callStatus(raw json.RawMessage) (json.RawMessage, *pluginapi.E
 		CRSVersion:    detection.CRSVersion,
 		RequiresRoot:  true,
 		Probed:        detection.Probed,
+		Backend:       Status(r.env, r.root),
 	}
 	if !detection.Found {
 		result.ErrorCode = pluginapi.E_UNSUPPORTED
 		result.Hint = installHint()
+		if result.Backend.Present || result.Backend.Channel {
+			result.Hint += "；IP 封禁与基础防护走 kore 自有 nft 数据面（backend），不依赖该引擎"
+		}
 	}
 	return encode(result)
 }
@@ -149,7 +172,30 @@ func (r *Runtime) callRules(raw json.RawMessage) (json.RawMessage, *pluginapi.Er
 	if err != nil {
 		return nil, classify(err)
 	}
+	result.Nft = nftRuleset(r.env, r.root)
 	return encode(result)
+}
+
+// nftRuleset 汇总 kore 自有 nft 数据面（封禁集合 + 基础防护规则）。
+func nftRuleset(env Environment, root RootActionFunc) NftRuleset {
+	backend := NewNftBackend(env, root)
+	availability := backend.Availability()
+	ruleset := NftRuleset{Table: NftTable, Chain: NftChain, Mode: ModeOff,
+		Rules: []NftRule{}, Bans: []NftElement{}}
+	if !availability.Available || root == nil {
+		return ruleset
+	}
+	state, err := backend.State()
+	if err != nil {
+		return ruleset
+	}
+	ruleset.Present = state.Present
+	ruleset.Mode = state.Mode
+	ruleset.Rules = state.Rules
+	ruleset.RulesCount = len(state.Rules)
+	ruleset.Bans = state.Bans
+	ruleset.BansCount = len(state.Bans)
+	return ruleset
 }
 
 // callLogs 读取拦截日志；未检测到引擎或日志不可读时返回结构化信息，不报错。
@@ -180,21 +226,130 @@ func (r *Runtime) callLogs(raw json.RawMessage) (json.RawMessage, *pluginapi.Err
 	return encode(result)
 }
 
-// callToggle 切换模式；无 root 通道时返回 E_NEED_ROOT。
+// callToggle 切换数据面模式（observe / enforce / off）。
 func (r *Runtime) callToggle(raw json.RawMessage) (json.RawMessage, *pluginapi.Error) {
-	var p toggleParams
+	var p ToggleParams
 	if perr := decodeOptional(raw, &p); perr != nil {
 		return nil, perr
 	}
-	mode, perr := checkMode(p.Mode)
-	if perr != nil {
-		return nil, perr
-	}
-	result, perr := Toggle(r.env, r.settings, ToggleParams{Mode: mode, Confirm: p.Confirm}, r.root)
+	result, perr := Toggle(r.env, p, r.root)
 	if perr != nil {
 		return nil, perr
 	}
 	return encode(result)
+}
+
+// callBan 封禁一个 IP/CIDR（写进 nft 集合，经 root-action 通道）。
+func (r *Runtime) callBan(raw json.RawMessage) (json.RawMessage, *pluginapi.Error) {
+	var p banParams
+	if perr := decodeStrict(raw, &p); perr != nil {
+		return nil, perr
+	}
+	if perr := checkBanReason(p.Reason); perr != nil {
+		return nil, perr
+	}
+	ip, perr := checkBanIP(p.IP)
+	if perr != nil {
+		return nil, perr
+	}
+	backend := NewNftBackend(r.env, r.root)
+	availability := backend.Availability()
+	if !availability.Available || r.root == nil {
+		return nil, needRoot("封禁 IP 需要 root-action 通道", availability.Hint)
+	}
+	if p.TTLS != 0 && (p.TTLS < MinBanTTLS || p.TTLS > MaxBanTTLS) {
+		return nil, invalid(fmt.Sprintf("ttl_s=%d 超出 %d–%d 秒（0 表示永久）", p.TTLS, MinBanTTLS, MaxBanTTLS))
+	}
+	result, err := backend.Ban(ip, p.TTLS)
+	if err != nil {
+		return nil, classifyToggleChannel(err)
+	}
+	result.Reason = p.Reason
+	return encode(result)
+}
+
+// callUnban 解封一个 IP/CIDR；不在集合里也算成功（幂等）。
+func (r *Runtime) callUnban(raw json.RawMessage) (json.RawMessage, *pluginapi.Error) {
+	var p unbanParams
+	if perr := decodeStrict(raw, &p); perr != nil {
+		return nil, perr
+	}
+	ip, perr := checkBanIP(p.IP)
+	if perr != nil {
+		return nil, perr
+	}
+	backend := NewNftBackend(r.env, r.root)
+	availability := backend.Availability()
+	if !availability.Available || r.root == nil {
+		return nil, needRoot("解封 IP 需要 root-action 通道", availability.Hint)
+	}
+	result, err := backend.Unban(ip)
+	if err != nil {
+		return nil, classifyToggleChannel(err)
+	}
+	return encode(result)
+}
+
+// callBans 列出封禁集合。
+func (r *Runtime) callBans(raw json.RawMessage) (json.RawMessage, *pluginapi.Error) {
+	var p bansParams
+	if perr := decodeOptional(raw, &p); perr != nil {
+		return nil, perr
+	}
+	limit, perr := checkBansLimit(p.Limit)
+	if perr != nil {
+		return nil, perr
+	}
+	backend := NewNftBackend(r.env, r.root)
+	result, err := backend.Bans()
+	if err != nil {
+		return nil, classifyToggleChannel(err)
+	}
+	if limit > 0 && len(result.Bans) > limit {
+		result.Bans = result.Bans[:limit]
+	}
+	return encode(result)
+}
+
+// checkBansLimit 校验 bans 的 limit：0 取缺省，负数或超上限拒绝。
+func checkBansLimit(limit int) (int, *pluginapi.Error) {
+	if limit == 0 {
+		return 0, nil
+	}
+	if limit < 0 {
+		return 0, invalid("limit 不能为负数")
+	}
+	if limit > 1000 {
+		return 0, invalid("limit 最多 1000，防止一次返回过多封禁项")
+	}
+	return limit, nil
+}
+
+// checkBanIP 校验并规范化封禁目标；非法地址是**参数错误**（E_INVALID），
+// 而不是执行面失败——参数错不该写进上游错误。
+func checkBanIP(raw string) (string, *pluginapi.Error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", invalid("缺少必填参数 ip")
+	}
+	normalized, _, err := normalizeIP(raw)
+	if err != nil {
+		return "", invalid(err.Error())
+	}
+	return normalized, nil
+}
+
+// checkBanReason 校验封禁原因：≤200 字符、无控制字符（只进结果，不进 argv）。
+func checkBanReason(raw string) *pluginapi.Error {
+	if raw == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(raw) > 200 {
+		return invalid("reason 超过 200 个字符")
+	}
+	if strings.IndexFunc(raw, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return invalid("reason 不得包含控制字符")
+	}
+	return nil
 }
 
 // settingsFor 仅在请求显式指定 engine 时覆盖配置里的首选引擎。

@@ -84,6 +84,8 @@ func (f faultEnv) environment() wafop.Environment {
 				return "/usr/bin/dpkg-query", true
 			case "nginx":
 				return "/usr/sbin/nginx", true
+			case "nft":
+				return "/usr/sbin/nft", true
 			}
 			return "", false
 		},
@@ -110,7 +112,7 @@ var methods = []struct {
 	{"status", "waf.status", `{}`},
 	{"rules", "waf.rules", `{}`},
 	{"logs", "waf.logs", `{"limit":5}`},
-	{"toggle", "waf.toggle", `{"mode":"detection"}`},
+	{"toggle", "waf.toggle", `{"mode":"enforce"}`},
 }
 
 // runtimeFor 为指定方法构造注入给定故障的执行面。
@@ -125,8 +127,8 @@ func runtimeFor(name string, kind wafop.FaultKind) *wafop.Runtime {
 	case "logs":
 		env.faultTail = true
 	case "toggle":
-		root = func(string, []string) ([]byte, int, error) {
-			return nil, -1, wafop.NewFaultError(kind, "root-action 执行面故障")
+		root = func(string, []string) (wafop.RootActionOutput, error) {
+			return wafop.RootActionOutput{ExitCode: -1}, wafop.NewFaultError(kind, "root-action 执行面故障")
 		}
 	}
 	return wafop.New(wafop.Options{
@@ -178,11 +180,17 @@ func sanityNoFault(t *testing.T) {
 	// toggle 无故障的完整成功路径在 wafop 单测覆盖；这里只反证通道存在时不是必定失败。
 	env := faultEnv{}
 	runtime := wafop.New(wafop.Options{
-		Env:        env.environment(),
-		Settings:   wafop.Settings{Engine: wafop.EngineModSecurity},
-		RootAction: func(string, []string) ([]byte, int, error) { return nil, 0, nil },
+		Env:      env.environment(),
+		Settings: wafop.Settings{Engine: wafop.EngineModSecurity},
+		RootAction: func(action string, _ []string) (wafop.RootActionOutput, error) {
+			if action == wafop.ActionNftList {
+				return wafop.RootActionOutput{Stdout: []byte(
+					`{"nftables":[{"table":{"family":"inet","name":"kore_waf"}}]}`)}, nil
+			}
+			return wafop.RootActionOutput{ExitCode: 0}, nil
+		},
 	})
-	if _, perr := runtime.Call("waf.toggle", []byte(`{"mode":"detection"}`)); perr != nil {
+	if _, perr := runtime.Call("waf.toggle", []byte(`{"mode":"enforce"}`)); perr != nil {
 		t.Fatalf("无故障时 toggle 不应返回协议错误: %v", perr)
 	}
 }
