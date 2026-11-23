@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/pengtang1024/kore-plugin-waf/internal/wafop"
 	"github.com/pengtang1024/kore/pkg/pluginapi"
 )
 
@@ -19,7 +18,7 @@ type statusResult struct {
 }
 
 // dispatch 把请求分发为响应帧；第二个返回值表示收到 kore.shutdown。
-func dispatch(request *pluginapi.Request, cfg config, logger *slog.Logger) (*pluginapi.Response, bool) {
+func dispatch(request *pluginapi.Request, cfg *config, logger *slog.Logger) (*pluginapi.Response, bool) {
 	response := &pluginapi.Response{Type: pluginapi.TypeResponse, ID: request.ID, ReqID: request.ReqID}
 	switch request.Method {
 	case "kore.shutdown":
@@ -30,10 +29,22 @@ func dispatch(request *pluginapi.Request, cfg config, logger *slog.Logger) (*plu
 		response.Result = pingResult(cfg)
 		return response, false
 	case "kore.reload":
-		response.Result = json.RawMessage(`{"ok":true,"config_digest":""}`)
+		result, perr := reloadConfig(cfg)
+		response.Result = result
+		response.Error = perr
+		return response, false
+	case cfg.id + ".config.get", "config.get":
+		result, perr := handleConfigGet(cfg)
+		response.Result = result
+		response.Error = perr
+		return response, false
+	case cfg.id + ".config.set", "config.set":
+		result, perr := handleConfigSet(request.Params, cfg)
+		response.Result = result
+		response.Error = perr
 		return response, false
 	}
-	result, perr := wafop.Call(request.Method, request.Params, cfg.rulesRoot, nil)
+	result, perr := cfg.runtime.Call(request.Method, request.Params)
 	if perr != nil {
 		response.Error = perr
 		response.Result = nil
@@ -44,7 +55,7 @@ func dispatch(request *pluginapi.Request, cfg config, logger *slog.Logger) (*plu
 }
 
 // pingResult 组装 kore.ping 结果。
-func pingResult(cfg config) json.RawMessage {
+func pingResult(cfg *config) json.RawMessage {
 	data, _ := json.Marshal(statusResult{
 		Status:     "ready",
 		UptimeS:    int64(time.Since(cfg.startedAt).Seconds()),

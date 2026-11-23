@@ -2,17 +2,16 @@ package wafop
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
-
-	"github.com/pengtang1024/kore/pkg/pluginapi"
 )
 
-// TestBusinessVerb 方法名归一化：waf.<verb> 与裸 <verb> 都接受。
+// TestBusinessVerb 方法名归一化：waf.<verb> 与裸 <verb> 都接受，blockLog 兼容到 logs。
 func TestBusinessVerb(t *testing.T) {
 	cases := map[string]string{
-		"waf.rules": "rules", "waf.blockLog": "blockLog",
-		"rules": "rules", "blockLog": "blockLog",
+		"waf.status": "status", "waf.rules": "rules", "waf.logs": "logs",
+		"waf.toggle": "toggle", "status": "status", "rules": "rules",
+		"logs": "logs", "toggle": "toggle",
+		"waf.blockLog": "logs", "blockLog": "logs",
 	}
 	for method, want := range cases {
 		got, ok := businessVerb(method)
@@ -27,54 +26,79 @@ func TestBusinessVerb(t *testing.T) {
 	}
 }
 
-// TestCallResults 两方法正常路径返回结构化占位结果（applied=false）。
-func TestCallResults(t *testing.T) {
-	rules, perr := Call("waf.rules", json.RawMessage(`{"rule_id":"WAF-0001","limit":5}`), testRoot, nil)
-	if perr != nil || !strings.Contains(string(rules), `"applied":false`) || !strings.Contains(string(rules), `"limit":5`) {
-		t.Fatalf("waf.rules 结果=%s err=%v", rules, perr)
+// TestCallNilParams status/ping 之外的方法缺 params 时按空对象处理（logs/toggle 再校验必填）。
+func TestCallNilParams(t *testing.T) {
+	env := newFakeEnv()
+	runtime := New(Options{Env: env.env()})
+	if _, perr := runtime.Call("waf.status", nil); perr != nil {
+		t.Fatalf("status 无参数应合法: %v", perr)
 	}
-	log, perr := Call("waf.blockLog", json.RawMessage(`{"limit":7}`), testRoot, nil)
-	if perr != nil || !strings.Contains(string(log), `"applied":false`) || !strings.Contains(string(log), `"limit":7`) {
-		t.Fatalf("waf.blockLog 结果=%s err=%v", log, perr)
+	if _, perr := runtime.Call("waf.logs", nil); perr != nil {
+		t.Fatalf("logs 无参数应取缺省值: %v", perr)
+	}
+	if _, perr := runtime.Call("waf.toggle", nil); perr == nil || perr.Code != "E_INVALID" {
+		t.Fatalf("toggle 缺 mode 应 E_INVALID，实际 %v", perr)
 	}
 }
 
-// TestCallParamValidation 非法参数形状、规则 ID 格式、limit 越界均返回 E_INVALID。
-func TestCallParamValidation(t *testing.T) {
-	bad := []struct {
-		method string
-		params string
-	}{
-		{"waf.rules", `[]`},
-		{"waf.rules", `not-json`},
-		{"waf.rules", `{"rule_id":"RULE-0001"}`},
-		{"waf.rules", `{"limit":1001}`},
-		{"waf.rules", `{"limit":-3}`},
-		{"waf.blockLog", `{"rule_id":"waf-0001"}`},
-		{"waf.blockLog", `{"limit":100000}`},
+// TestCallResultsShape 正常路径结果是显式结构（不是空壳）。
+func TestCallResultsShape(t *testing.T) {
+	env := newFakeEnv()
+	env.addFile("/etc/modsecurity/modsecurity.conf", "SecRuleEngine On\nSecRule ARGS \"@rx a\" \"id:1\"\n")
+	runtime := New(Options{Env: env.env()})
+	raw, perr := runtime.Call("waf.rules", json.RawMessage(`{}`))
+	if perr != nil {
+		t.Fatalf("rules: %v", perr)
 	}
-	for _, c := range bad {
-		_, perr := Call(c.method, json.RawMessage(c.params), testRoot, nil)
-		if perr == nil || perr.Code != pluginapi.E_INVALID {
-			t.Fatalf("Call(%s,%s) 错误=%v，期望 E_INVALID", c.method, c.params, perr)
-		}
+	var result RulesResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("解析 rules: %v", err)
+	}
+	if !result.Available || result.Total != 1 || len(result.RuleSets) != 1 {
+		t.Fatalf("rules 结果不完整: %+v", result)
+	}
+	if result.RuleSets[0].Name == "" || result.RuleSets[0].RuleCount != 1 {
+		t.Fatalf("规则集字段不完整: %+v", result.RuleSets[0])
+	}
+
+	logRaw, perr := runtime.Call("waf.logs", json.RawMessage(`{"limit":7}`))
+	if perr != nil {
+		t.Fatalf("logs: %v", perr)
+	}
+	var logs LogsResult
+	if err := json.Unmarshal(logRaw, &logs); err != nil {
+		t.Fatalf("解析 logs: %v", err)
+	}
+	if logs.Limit != 7 || !logs.Available {
+		t.Fatalf("logs 结果不完整: %+v", logs)
 	}
 }
 
 // TestCallUnknownMethod 未知方法返回 E_NOTFOUND。
 func TestCallUnknownMethod(t *testing.T) {
-	_, perr := Call("waf.exec", json.RawMessage(`{}`), testRoot, nil)
-	if perr == nil || perr.Code != pluginapi.E_NOTFOUND {
+	env := newFakeEnv()
+	runtime := New(Options{Env: env.env()})
+	_, perr := runtime.Call("waf.exec", json.RawMessage(`{}`))
+	if perr == nil || perr.Code != "E_NOTFOUND" {
 		t.Fatalf("未知方法错误=%v，期望 E_NOTFOUND", perr)
 	}
 }
 
-// TestCallMissingParams 缺少 params 对象返回 E_INVALID。
-func TestCallMissingParams(t *testing.T) {
-	for _, raw := range []string{``, `null`} {
-		_, perr := Call("waf.rules", json.RawMessage(raw), testRoot, nil)
-		if perr == nil || perr.Code != pluginapi.E_INVALID {
-			t.Fatalf("Call(空 params=%q) 错误=%v，期望 E_INVALID", raw, perr)
-		}
+// TestSetSettingsHotApplies config.set 语义：替换 settings 后下一次调用立即使用新目录。
+func TestSetSettingsHotApplies(t *testing.T) {
+	env := newFakeEnv()
+	env.addFile("/opt/waf/rules/a.conf", "SecRule ARGS \"@rx a\" \"id:1\"\n")
+	runtime := New(Options{Env: env.env()})
+	runtime.SetSettings(Settings{Engine: EngineModSecurity, RulesDirs: []string{"/opt/waf/rules"}})
+	raw, perr := runtime.Call("waf.status", nil)
+	if perr != nil {
+		t.Fatalf("status: %v", perr)
+	}
+	var status StatusResult
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("解析 status: %v", err)
+	}
+	if !status.Available || status.RulesCount != 1 {
+		t.Fatalf("热替换设置未生效: %+v", status)
 	}
 }

@@ -11,7 +11,7 @@ import (
 )
 
 // serve 执行会话循环：读帧 → 分发 → 写 response；收到 kore.shutdown 后返回 nil。
-func serve(conn net.Conn, cfg config, logger *slog.Logger) error {
+func serve(conn net.Conn, cfg *config, logger *slog.Logger) error {
 	for {
 		payload, err := pluginapi.ReadFrame(conn, pluginapi.MaxFrameSize)
 		if err != nil {

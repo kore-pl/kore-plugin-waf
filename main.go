@@ -34,9 +34,9 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("连接主壳 socket %s: %w", cfg.socket, err)
 	}
 	defer func() { _ = conn.Close() }()
-	if err := handshake(conn, cfg); err != nil {
+	if err := handshake(conn, &cfg); err != nil {
 		return err
 	}
 	logger.Info("hello 完成", "plugin_id", cfg.id, "version", cfg.version)
-	return serve(conn, cfg, logger)
+	return serve(conn, &cfg, logger)
 }

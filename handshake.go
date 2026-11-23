@@ -38,7 +38,7 @@ type helloResult struct {
 }
 
 // handshake 完成三步握手：发 kore.hello → 读响应帧 → 校验 ok/协议。
-func handshake(conn net.Conn, cfg config) error {
+func handshake(conn net.Conn, cfg *config) error {
 	requestID, err := randomID()
 	if err != nil {
 		return fmt.Errorf("生成握手请求 id: %w", err)
@@ -76,7 +76,7 @@ func handshake(conn net.Conn, cfg config) error {
 }
 
 // newHelloParams 用运行期配置组装 §5 握手参数。
-func newHelloParams(cfg config) helloParams {
+func newHelloParams(cfg *config) helloParams {
 	return helloParams{
 		PluginID:     cfg.id,
 		ID:           cfg.id,

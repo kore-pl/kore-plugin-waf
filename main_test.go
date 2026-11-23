@@ -9,18 +9,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pengtang1024/kore-plugin-waf/internal/plugincfg"
+	"github.com/pengtang1024/kore-plugin-waf/internal/wafop"
 	"github.com/pengtang1024/kore/pkg/pluginapi"
 )
 
 // testConfig 构造握手与会话循环共用的一致配置（不依赖环境变量）。
-func testConfig() config {
-	return config{
+func testConfig(t *testing.T) *config {
+	t.Helper()
+	stateDir := t.TempDir()
+	values := defaultValues()
+	settings, err := settingsFromValues(values)
+	if err != nil {
+		t.Fatalf("构造 settings: %v", err)
+	}
+	return &config{
 		id:           "waf",
-		version:      "0.1.0",
+		version:      "0.2.0",
 		requiresKore: ">=0.1.0 <0.2.0",
-		capabilities: []string{"system:read"},
-		rulesRoot:    "/var/lib/kore/waf",
+		capabilities: []string{"system:read", "system:admin"},
 		startedAt:    time.Now(),
+		stateDir:     stateDir,
+		store:        plugincfg.NewStore(stateDir),
+		values:       values,
+		source:       plugincfg.SourceDefault,
+		runtime:      wafop.New(wafop.Options{Settings: settings}),
 	}
 }
 
@@ -65,7 +78,7 @@ func TestHandshake(t *testing.T) {
 	pluginConn, kernelConn := net.Pipe()
 	defer func() { _ = kernelConn.Close() }()
 	done := make(chan error, 1)
-	go func() { done <- handshake(pluginConn, testConfig()); _ = pluginConn.Close() }()
+	go func() { done <- handshake(pluginConn, testConfig(t)); _ = pluginConn.Close() }()
 
 	request := readRequest(t, kernelConn)
 	if request.Method != helloMethod {
@@ -78,7 +91,7 @@ func TestHandshake(t *testing.T) {
 	if params.PluginID != "waf" || params.ID != "waf" {
 		t.Fatalf("plugin_id/id=%q/%q，期望 waf", params.PluginID, params.ID)
 	}
-	if params.Protocol != pluginapi.Protocol || params.Version != "0.1.0" {
+	if params.Protocol != pluginapi.Protocol || params.Version != "0.2.0" {
 		t.Fatalf("protocol/version=%q/%q 不符合 §5", params.Protocol, params.Version)
 	}
 	if params.PID != os.Getpid() {
@@ -100,7 +113,7 @@ func TestServeShutdown(t *testing.T) {
 	pluginConn, kernelConn := net.Pipe()
 	defer func() { _ = kernelConn.Close() }()
 	done := make(chan error, 1)
-	go func() { done <- serve(pluginConn, testConfig(), testLogger()); _ = pluginConn.Close() }()
+	go func() { done <- serve(pluginConn, testConfig(t), testLogger()); _ = pluginConn.Close() }()
 
 	request := &pluginapi.Request{
 		Type: pluginapi.TypeRequest, ID: "id-shutdown", ReqID: "r-shutdown", Method: "kore.shutdown",
@@ -127,11 +140,13 @@ func TestServeMethodThenShutdown(t *testing.T) {
 	pluginConn, kernelConn := net.Pipe()
 	defer func() { _ = kernelConn.Close() }()
 	done := make(chan error, 1)
-	go func() { done <- serve(pluginConn, testConfig(), testLogger()); _ = pluginConn.Close() }()
+	go func() { done <- serve(pluginConn, testConfig(t), testLogger()); _ = pluginConn.Close() }()
 
 	requests := []*pluginapi.Request{
-		{Type: pluginapi.TypeRequest, ID: "id-rules", ReqID: "r-rules", Method: "waf.rules", Params: json.RawMessage(`{"rule_id":"WAF-0001"}`)},
-		{Type: pluginapi.TypeRequest, ID: "id-log", ReqID: "r-log", Method: "waf.blockLog", Params: json.RawMessage(`{"limit":3}`)},
+		{Type: pluginapi.TypeRequest, ID: "id-status", ReqID: "r-status", Method: "waf.status", Params: json.RawMessage(`{}`)},
+		{Type: pluginapi.TypeRequest, ID: "id-rules", ReqID: "r-rules", Method: "waf.rules", Params: json.RawMessage(`{}`)},
+		{Type: pluginapi.TypeRequest, ID: "id-log", ReqID: "r-log", Method: "waf.logs", Params: json.RawMessage(`{"limit":3}`)},
+		{Type: pluginapi.TypeRequest, ID: "id-cfg", ReqID: "r-cfg", Method: "waf.config.get", Params: json.RawMessage(`{}`)},
 		{Type: pluginapi.TypeRequest, ID: "id-shutdown", ReqID: "r-shutdown", Method: "kore.shutdown"},
 	}
 	for _, request := range requests {

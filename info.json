@@ -1,17 +1,40 @@
 {
   "id": "waf",
   "name": "WAF 插件",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "basic",
   "entry": "bin/waf",
-  "capabilities": ["system:read"],
+  "capabilities": ["system:read", "system:admin"],
+  "method_capabilities": {
+    "waf.status": "system:read",
+    "waf.rules": "system:read",
+    "waf.logs": "system:read",
+    "waf.config.get": "system:read",
+    "waf.config.set": "system:admin",
+    "waf.toggle": "system:admin"
+  },
   "triggers": [],
   "requires_kore": ">=0.1.0 <0.2.0",
   "resources": {"memory_mb": 6, "cpu_quota": "15%", "pids_max": 16},
   "depends_on": [],
   "conflicts": [],
   "scenario_tags": ["sec"],
-  "size_bytes": 1367766
+  "size_bytes": 2870917,
+  "requires_root": true,
+  "root_actions": [
+    {
+      "id": "modsec-set-mode",
+      "argv": ["/bin/sed", "-i.bak"],
+      "timeout_s": 15,
+      "description": "写入 kore 管理的 WAF 模式包含文件（追加参数：-e、sed 表达式、文件路径）；-i.bak 保留上一版可回滚"
+    },
+    {
+      "id": "nginx-reload",
+      "argv": ["nginx", "-s", "reload"],
+      "timeout_s": 20,
+      "description": "重载 nginx 使 WAF 模式变更生效；失败不自动回滚，插件会如实返回 applied=false"
+    }
+  ]
 }
