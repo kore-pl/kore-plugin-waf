@@ -147,6 +147,8 @@ type RulesResult struct {
 	RuleSets  []RuleSet  `json:"rulesets"`
 	Total     int        `json:"total"`
 	Nft       NftRuleset `json:"nft"`
+	// Chain 是 kore_waf input 链上的规则（内置 4 条 + 自定义），builtin/enabled 可区分。
+	Chain []ChainRule `json:"chain"`
 }
 
 // LogSource 是一份日志文件的读取情况（只读尾部）。

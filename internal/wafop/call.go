@@ -25,6 +25,7 @@ type Runtime struct {
 	env      Environment
 	settings Settings
 	root     RootActionFunc
+	registry *ruleRegistry
 }
 
 // New 构造 Runtime；Env 缺省字段补真实实现，Settings 补齐缺省值。
@@ -66,6 +67,12 @@ func (r *Runtime) Call(method string, params json.RawMessage) (json.RawMessage, 
 		return r.callUnban(params)
 	case "bans":
 		return r.callBans(params)
+	case "rule.add":
+		return r.callRuleAdd(params)
+	case "rule.remove":
+		return r.callRuleRemove(params)
+	case "rule.toggle":
+		return r.callRuleToggle(params)
 	}
 	return nil, errNotFound(method)
 }
@@ -74,7 +81,7 @@ func (r *Runtime) Call(method string, params json.RawMessage) (json.RawMessage, 
 func businessVerb(method string) (string, bool) {
 	verb := strings.TrimPrefix(method, "waf.")
 	switch verb {
-	case "status", "rules", "logs", "blockLog", "toggle", "ban", "unban", "bans":
+	case "status", "rules", "logs", "blockLog", "toggle", "ban", "unban", "bans", "rule.add", "rule.remove", "rule.toggle":
 		if verb == "blockLog" {
 			return "logs", true
 		}

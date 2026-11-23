@@ -1,7 +1,7 @@
 {
   "id": "waf",
   "name": "WAF 插件",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "production",
@@ -19,7 +19,10 @@
     "waf.ban": "system:admin",
     "waf.unban": "system:admin",
     "waf.toggle": "system:admin",
-    "waf.config.set": "system:admin"
+    "waf.config.set": "system:admin",
+    "waf.rule.add": "system:admin",
+    "waf.rule.remove": "system:admin",
+    "waf.rule.toggle": "system:admin"
   },
   "triggers": [],
   "requires_kore": ">=0.1.0 <0.2.0",
@@ -33,7 +36,7 @@
   "scenario_tags": [
     "sec"
   ],
-  "size_bytes": 2915821,
+  "size_bytes": 2930571,
   "requires_root": true,
   "root_actions": [
     {
@@ -172,6 +175,35 @@
       "timeout_s": 15,
       "irreversible": false,
       "description": "只读列出 kore 表（JSON）：封禁元素、剩余超时、规则与计数器，供状态/回读校验"
+    },
+    {
+      "id": "nft-add-rule",
+      "argv": [
+        "nft",
+        "add",
+        "rule",
+        "inet",
+        "kore_waf",
+        "input"
+      ],
+      "timeout_s": 15,
+      "irreversible": false,
+      "description": "向 input 链加规则（固定头；尾随只接受受控表达式 token，最多 28 个、单语句）"
+    },
+    {
+      "id": "nft-delete-rule",
+      "argv": [
+        "nft",
+        "delete",
+        "rule",
+        "inet",
+        "kore_waf",
+        "input",
+        "handle"
+      ],
+      "timeout_s": 15,
+      "irreversible": false,
+      "description": "按 handle 删除 input 链上的规则（handle 为正整数）"
     }
   ]
 }

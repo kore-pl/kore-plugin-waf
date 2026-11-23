@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 (2026-11-23)
+
+- feat(protocol): 新增 `waf.rule.add` / `waf.rule.remove` / `waf.rule.toggle`——在 kore 自有 `table inet kore_waf` 的 input 链上增删/启停规则；参数 `{name, expr, action, enabled}`，结果回带写后回读的 `chain[]`
+- feat(protocol): `waf.rules` 增 `chain[]: {name, expr, action, enabled, builtin, handle}`，内置 4 条基础防护 `builtin=true`
+- feat(safety): expr 只接受受控匹配器白名单（`ip saddr` / `ip6 saddr` / `tcp dport` / `udp dport` / `ct state` / `tcp flags syn`），值逐项校验；其余 `E_UNSUPPORTED` + hint（含 `; flush ruleset` / `include` / 任意 nft 语法）
+- feat(safety): 每条规则带 `comment kore-rule-<name>`，写后 `nft -j list` 回读比对；不一致返回 `E_UPSTREAM` 并回滚（按 comment 反查 handle 删除）
+- feat(safety): 内置 4 条规则不可删除（`E_INVALID`「内置规则只能停用不能删除」），只能 toggle；toggle 幂等
+- feat(protocol): 新增 root_actions `nft-add-rule`（固定头 + 受控表达式追加，≤28 token、单语句）与 `nft-delete-rule`（handle 正整数），形状由内核 RootCommandPolicies（ADR-0022 增补）二次兜底
+- test: 白名单/注入拒绝、内置删除拒绝、action 仅 drop|accept、name 收紧、回读/回滚路径
+- **依赖**：内核形状在 kore `48a9bbe`；插件 `go.mod` 仍 require `pluginapi v0.1.3`，待 SDK 发布含新形状的版本后 `TestInfoJSONRootActionsSchema` 才能在干净依赖下通过（本地以 replace 指向 kore 工作树验证全绿）
+
+
 ## 0.3.1 (2026-11-23)
 
 ### Changed
