@@ -227,7 +227,12 @@ func checkAction(action string) *pluginapi.Error {
 	return nil
 }
 
-// nftChainRules 回读链上规则（handle + comment + verdict）。
+// nftChainRules 回读链上规则（name/expr/action/enabled/builtin/handle）。
+//
+// nft 1.1.x 把 `comment "kore-rule-x"` 放在 **rule 对象顶层**（"comment":"kore-rule-x"），
+// 不在 expr[] 里；0.4.1 只扫 expr 导致 chain 恒空、rule.add 写后回读必失败（已发版缺陷）。
+// 这里三层兜底：① rule.comment ② expr 里的 {"comment":...} ③ 都没有 → 非 kore 规则跳过；
+// 内置 4 条规则本身没有 comment，用 token 签名识别（否则 UI 拿不到「内置+自定义」混合列表）。
 func (b *NftBackend) nftChainRules() ([]ChainRule, error) {
 	output, err := b.call(ActionNftList, nil)
 	if err != nil {
@@ -236,57 +241,118 @@ func (b *NftBackend) nftChainRules() ([]ChainRule, error) {
 		}
 		return nil, err
 	}
+	return parseChainRules(output.Stdout, NftChain)
+}
+
+// parseChainRules 解析 `nft -j list table/chain` 输出。
+func parseChainRules(stdout []byte, wantChain string) ([]ChainRule, error) {
 	var payload struct {
 		Nftables []map[string]json.RawMessage `json:"nftables"`
 	}
-	if err := json.Unmarshal(output.Stdout, &payload); err != nil {
+	if err := json.Unmarshal(stdout, &payload); err != nil {
 		return nil, NewOpError(OpFailed, "解析 nft JSON 失败: "+err.Error())
 	}
 	rules := []ChainRule{}
+	ruleObjects := 0
+	seenAnyComment := false
 	for _, object := range payload.Nftables {
 		rawRule, ok := object["rule"]
 		if !ok {
 			continue
 		}
+		ruleObjects++
 		var rule struct {
-			Handle int               `json:"handle"`
-			Expr   []json.RawMessage `json:"expr"`
+			Chain   string            `json:"chain"`
+			Handle  int               `json:"handle"`
+			Comment string            `json:"comment"`
+			Expr    []json.RawMessage `json:"expr"`
 		}
 		if err := json.Unmarshal(rawRule, &rule); err != nil {
 			continue
 		}
-		var comment, verdict string
+		if wantChain != "" && rule.Chain != "" && rule.Chain != wantChain {
+			continue
+		}
+		comment, verdict := rule.Comment, ""
+		seenComment := rule.Comment != ""
+		if seenComment {
+			seenAnyComment = true
+		}
 		for _, exprRaw := range rule.Expr {
-			var expr struct {
-				Comment string `json:"comment"`
-				Accept  *bool  `json:"accept"`
-				Drop    *bool  `json:"drop"`
-			}
+			var expr map[string]json.RawMessage
 			if err := json.Unmarshal(exprRaw, &expr); err != nil {
 				continue
 			}
-			if expr.Comment != "" {
-				comment = expr.Comment
-			}
-			if expr.Drop != nil {
+			// nft 1.1.x 用 null 表示动作：只要键存在就是该动作（不能靠 *bool 非 nil 判断）。
+			if _, ok := expr["drop"]; ok {
 				verdict = "drop"
 			}
-			if expr.Accept != nil {
+			if _, ok := expr["accept"]; ok {
 				verdict = "accept"
 			}
-		}
-		if comment == "" || !strings.HasPrefix(comment, ruleCommentPrefix) {
-			continue
-		}
-		name := strings.TrimPrefix(comment, ruleCommentPrefix)
-		builtin := false
-		for _, candidate := range builtinRules {
-			if candidate.Name == name {
-				builtin = true
+			if raw, ok := expr["comment"]; ok {
+				seenComment = true
+				seenAnyComment = true
+				var text string
+				if json.Unmarshal(raw, &text) == nil && text != "" && comment == "" {
+					comment = text
+				}
 			}
 		}
-		rules = append(rules, ChainRule{Name: name, Action: verdict, Enabled: true,
-			Builtin: builtin, Handle: rule.Handle})
+		if strings.HasPrefix(comment, ruleCommentPrefix) {
+			name := strings.TrimPrefix(comment, ruleCommentPrefix)
+			builtin := false
+			for _, candidate := range builtinRules {
+				if candidate.Name == name {
+					builtin = true
+				}
+			}
+			rules = append(rules, ChainRule{Name: name, Action: verdict, Enabled: true,
+				Builtin: builtin, Handle: rule.Handle})
+			continue
+		}
+		// 内置规则没有 comment：按 expr 里的特征 token 识别，保证 chain 能列出 4 条内置规则。
+		if name, ok := builtinByTokens(rule.Expr); ok {
+			verdict = "drop"
+			if name == "syn-rate" || name == "conn-rate" {
+				verdict = "observe"
+			}
+			for _, candidate := range builtinRules {
+				if candidate.Name == name {
+					rules = append(rules, ChainRule{Name: name, Expr: candidate.Expr, Action: verdict,
+						Enabled: true, Builtin: true, Handle: rule.Handle})
+					break
+				}
+			}
+		}
+	}
+	// 兜底：JSON 里明明有规则对象、却一条 kore 规则都没解析出来 → 显式 E_UPSTREAM（不静默当空）。
+	if ruleObjects > 0 && len(rules) == 0 && !seenAnyComment {
+		snippet := string(stdout)
+		if len(snippet) > 400 {
+			snippet = snippet[:400] + "…"
+		}
+		return nil, NewOpError(OpFailed, "nft 回读解析不到任何 kore 规则（规则对象 "+strconv.Itoa(ruleObjects)+
+			" 条）；原始输出片段："+snippet)
 	}
 	return rules, nil
+}
+
+// builtinByTokens 用特征 token 识别没有 comment 的内置规则。
+func builtinByTokens(exprs []json.RawMessage) (string, bool) {
+	joined := ""
+	for _, exprRaw := range exprs {
+		joined += string(exprRaw)
+	}
+	switch {
+	case strings.Contains(joined, "@banned4"):
+		return "ban-ipv4", true
+	case strings.Contains(joined, "@banned6"):
+		return "ban-ipv6", true
+	case strings.Contains(joined, "kore_syn4"):
+		return "syn-rate", true
+	case strings.Contains(joined, `"ct count"`) || (strings.Contains(joined, `"ct":`) && strings.Contains(joined, "count")):
+		return "conn-rate", true
+	}
+	return "", false
 }

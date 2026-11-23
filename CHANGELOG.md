@@ -1,3 +1,19 @@
+## 0.4.3 — 2026-11-23
+
+### 修复（已发版缺陷）
+
+- **nft JSON comment 解析**：`nft -j list table` 在 nft 1.1.x 上把 `comment "kore-rule-<name>"`
+  放在 **rule 对象顶层**（`"comment":"kore-rule-x"`），0.4.1/0.4.2 只扫 `expr[]`，导致
+  `waf.rules.chain` 恒为空、`waf.rule.add` 写后回读必失败并回滚——**已发版功能「新增规则」在 nft 1.1.x 上 100% 失败**。
+  现在三层兜底：① `rule.comment` ② `expr[].comment` ③ 都没有视为非 kore 规则跳过；
+  动作识别改为「键存在即动作」（nft 用 `null` 表示 drop/accept）。
+- **内置规则识别**：4 条内置规则没有 comment，改用 expr 特征（`@banned4` / `@banned6` / `kore_syn4` / `ct count`）
+  识别并标 `builtin=true`，UI 才能同时列出内置与自定义规则。
+- **静默空兜底**：JSON 里有规则对象、却一条 kore 规则都没解析出来时返回 `E_UPSTREAM` 并附原始输出片段，
+  不再静默当成「没有规则」。
+- 测试：用本机 nft 1.1.6 的**真实 `-j` 输出**做 fixture（`internal/wafop/testdata/nft-list-116*.json`），
+  覆盖内置+自定义混合、只有内置、comment 缺失、非目标 chain、空表、解析兜底。
+
 # Changelog
 
 ## 0.4.2 (2026-11-23)
