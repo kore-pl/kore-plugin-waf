@@ -6,11 +6,11 @@ WAF 管理插件（**L1.5+ · 引擎无关 + 真实 nft 数据面**）：
 本仓**不内置任何 WAF 引擎**，也**不在插件进程里 exec nft**：一切写操作都经 ADR-0018 的 root-action 通道（ADR-0022 锁死命令形状）。
 
 - 协议：`kore.plugin.v1`，`lifecycle=lazy`，`depth_level=basic`
-- 能力：`system:read` + `system:admin`（写方法 `waf.ban` / `waf.unban` / `waf.toggle` / `waf.config.set` 走 admin）
+- 能力：`system:read` + `system:admin`（写方法 `waf.ban` / `waf.unban` / `waf.toggle` / `waf.config.set` / `waf.rule.add` / `waf.rule.remove` / `waf.rule.toggle` 走 admin）
 - 提权：声明 `requires_root: true` + **12 个 `root_actions`**（全为 nft 语句，全部 `irreversible:false`——都能反向操作）
 - 场景标签：`sec`
 
-## 1. 方法面（7 个业务方法 + 配置契约）
+## 1. 方法面（10 个业务方法 + 配置契约）
 
 | 方法 | 入参 | 结果要点 |
 | --- | --- | --- |
@@ -21,9 +21,15 @@ WAF 管理插件（**L1.5+ · 引擎无关 + 真实 nft 数据面**）：
 | `waf.ban` | `{ip, ttl_s?, reason?}` | `ip / family / set / ttl_s / banned / steps[]`（幂等；`ttl_s=0` 永久，60–2592000） |
 | `waf.unban` | `{ip}` | `ip / set / removed / steps[]`（不在集合里也算成功） |
 | `waf.bans` | `{limit?}` | `present / mode / count / bans[{ip,timeout_s,expires_s,set}]` |
+| `waf.rule.add` | `{name, expr, action?"drop\|accept", enabled?}` | `{applied, dry_run, op:"add", rule{name,expr,action,enabled,builtin}, chain[]}`：受控匹配器白名单，写后 `nft -j list` 回读比对，不一致即回滚 |
+| `waf.rule.remove` | `{name}` | `{applied, dry_run, op:"remove", rule, chain[]}`：内置 4 条规则不可删（`E_INVALID`，改用 `rule.toggle`） |
+| `waf.rule.toggle` | `{name, enabled:true\|false}` | `{applied, dry_run, op:"toggle", rule, chain[]}`：内置按模板重建 / 删除，自定义按登记参数重建；幂等 |
 | `waf.config.get` / `waf.config.set` | `{}` / `{values}` | 契约见 [docs/PLUGIN-CONFIG.md](https://github.com/pengtang1024/kore/blob/main/docs/PLUGIN-CONFIG.md)，字段见 §5 |
 
 `waf.<verb>` 与裸 `<verb>` 都接受；`waf.blockLog` 是 `waf.logs` 的兼容别名（0.1.x 客户端不炸）。
+`waf.rule.*` 需要 root-action 通道（`nft-add-rule` / `nft-delete-rule`），无通道时 `E_NEED_ROOT`；
+`name` 只允许小写字母 / 数字 / `-` / `_`（1–32），`expr` 只接受白名单匹配器（`ip saddr`、`ip6 saddr`、`tcp dport`、`udp dport`、`ct state`、`tcp flags syn`），
+其余一律 `E_UNSUPPORTED` + hint（不把用户输入当 nft 语法）；内置 4 条只能停用不能删除，**停用状态记在插件进程内**（插件重启后按默认全开）。
 参数对象严格解码：拼错字段名返回 `E_INVALID`，不静默忽略。
 
 ## 2. 引擎检测策略
@@ -181,7 +187,8 @@ make build && make dist
 
 ## 10. 版本历史
 
-见 [CHANGELOG.md](CHANGELOG.md)：`0.3.0` 接真实 nft 数据面（封禁集合 / 基础防护 / observe·enforce 切换，删除 sed 写入口）；
+见 [CHANGELOG.md](CHANGELOG.md)：`0.4.x` 增加 `waf.rule.add/remove/toggle`（受控匹配器白名单 + 写后回读）并修复 `waf.rules.chain` 恒空 / 回读 `expr` 为空；
+`0.3.0` 接真实 nft 数据面（封禁集合 / 基础防护 / observe·enforce 切换，删除 sed 写入口）；
 `0.2.0` 去 noop（引擎检测 / 规则统计 / 日志解析 / 配置契约）。
 
 <!-- oss:begin -->
