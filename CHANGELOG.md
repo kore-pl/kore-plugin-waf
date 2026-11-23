@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 (2026-11-23)
+
+- build(deps): `pluginapi v0.1.3 → v0.1.5`（v0.1.5 含 ADR-0022 增补的两条 nft 受控形状）；**干净依赖下 `TestInfoJSONRootActionsSchema` 与 `TestMethodCapabilitiesCoverBusinessVerbs` 真绿**（不再依赖本地 replace）
+- test: 补 `toggle 幂等`、`回读不一致触发回滚`、`内置 toggle 允许` 三条用例（过渡期已在本地 replace 下验证，本版在 v0.1.5 真模块下复核）
+- 说明：0.4.0 未发版（tag/release 均未创建），直接以 0.4.1 发布；require 变化必然改变 dist sha，符合 RELEASE §0
+- 已知：`size_bytes` 与包体实际字节数可能差 1–2 字节（Makefile 固定点问题，另行系统性修复；本版如实记录、不改 description 凑数）
+
+
 ## 0.4.0 (2026-11-23)
 
 - feat(protocol): 新增 `waf.rule.add` / `waf.rule.remove` / `waf.rule.toggle`——在 kore 自有 `table inet kore_waf` 的 input 链上增删/启停规则；参数 `{name, expr, action, enabled}`，结果回带写后回读的 `chain[]`

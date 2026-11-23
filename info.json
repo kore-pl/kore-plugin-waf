@@ -1,7 +1,7 @@
 {
   "id": "waf",
   "name": "WAF 插件",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "production",
