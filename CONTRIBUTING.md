@@ -1,6 +1,6 @@
 # 贡献指南（CONTRIBUTING）
 
-本仓库是 **kore** 的「WAF 插件」插件：id `waf`，生命周期 `lazy`，深度等级 `production`，协议 `kore.plugin.v1`，`requires_kore` 为 `>=0.1.0 <0.2.0`。它独立成仓：独立版本线、独立发版。**本仓不配 GitHub CI**（2026-11-23 策略：CI 少执行——GitHub CI 只在 kore 根仓的 push main / tag / PR / workflow_dispatch 跑）：日常验证用本地 `make check`，发布前跑两次 `make dist` 核对 sha 一致。内核与协议仓库 `kore` 的改动不在本仓做。
+本仓库是 **kore** 的「WAF 插件」插件：id `waf`，生命周期 `lazy`，深度等级 `production`，协议 `kore.plugin.v1`，`requires_kore` 为 `>=0.1.0 <0.2.0`。它独立成仓：独立版本线、独立 CI（**少触发**：push main / tag `v*` / PR / 手动，2026-11-23 策略：CI 少执行）、独立发版。日常验证用本地 `make check`；发布前跑两次 `make dist` 核对 sha 一致。内核与协议仓库 `kore` 的改动不在本仓做。
 
 ## 1. 能改与不能改
 

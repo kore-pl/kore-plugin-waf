@@ -1,7 +1,7 @@
 name: CI
 
-# 与 kore 同一策略（2026-11-23）：CI 少执行——push main / tag v* / PR / 手动。
-# 日常反馈在本地：gofmt -l + go vet + go test + make dist 两跑 sha 一致。
+# 2026-11-23 策略：CI 只做兜底，少触发——push main / tag v* / PR / 手动。
+# check 是合并前必跑；oss 校验九件套与占位残留；release 只在 tag 上产出 dist。
 on:
   push:
     branches: ["main"]
@@ -18,32 +18,80 @@ concurrency:
 
 jobs:
   check:
-    name: vet + test + dist（可复现）
+    name: Build + check
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      GOWORK: "off"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make check
+        run: make check
+
+      - name: make build
+        run: make build
+
+  oss:
+    name: OSS assets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-          cache: true
-      - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - name: go vet
-        run: go vet ./...
-      - name: go test
-        run: go test ./...
-      - name: dist 可复现（两次 sha 一致）
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 九件套 / LICENSE / 占位残留
         run: |
-          make dist
-          a=$(sha256sum dist/*.tar.gz | awk '{print $1}')
-          make dist
-          b=$(sha256sum dist/*.tar.gz | awk '{print $1}')
-          test "$a" = "$b" || { echo "dist sha 漂移: $a != $b"; exit 1; }
-      - name: 开源九件套自检
-        run: |
-          for f in CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md AGENTS.md \
-                   .github/PULL_REQUEST_TEMPLATE.md .github/ISSUE_TEMPLATE/bug_report.yml \
-                   .github/ISSUE_TEMPLATE/feature_request.yml .github/ISSUE_TEMPLATE/config.yml \
-                   .github/workflows/ci.yml; do
-            test -f "$f" || { echo "缺 $f"; exit 1; }
+          set -eu
+          files="CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md AGENTS.md \
+                 .github/PULL_REQUEST_TEMPLATE.md \
+                 .github/ISSUE_TEMPLATE/bug_report.yml \
+                 .github/ISSUE_TEMPLATE/feature_request.yml \
+                 .github/ISSUE_TEMPLATE/config.yml \
+                 .github/workflows/ci.yml"
+          for f in $files; do
+            [ -f "$f" ] || { echo "[FAIL] 缺 $f"; exit 1; }
           done
+          grep -qF 'MIT License' LICENSE || { echo "[FAIL] LICENSE 缺 MIT License"; exit 1; }
+          grep -qF 'Permission is hereby granted' LICENSE || { echo "[FAIL] LICENSE 缺 MIT 许可句"; exit 1; }
+          grep -qF '<!-- oss:begin -->' README.md || { echo "[FAIL] README 缺 oss:begin"; exit 1; }
+          grep -qF '<!-- oss:end -->' README.md || { echo "[FAIL] README 缺 oss:end"; exit 1; }
+          stale="$(grep -nF '{{' $files | grep -vF '${{' || true)"
+          if [ -n "$stale" ]; then
+            echo "[FAIL] 生成文件残留占位符："
+            echo "$stale"
+            exit 1
+          fi
+          echo "[OK] 九件套 / LICENSE / 占位符检查通过"
+
+  release:
+    name: Dist artifact
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make dist
+        run: make dist
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
