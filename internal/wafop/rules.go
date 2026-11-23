@@ -15,10 +15,15 @@ const maxRuleScanDepth = 2
 
 // ListRules 统计规则集。文件型引擎按目录扫描并统计指令行数；crowdsec 走
 // `cscli scenarios list -o json`。未检测到引擎时返回结构化不可用，不报错。
-func ListRules(env Environment, settings Settings, detection Detection) (RulesResult, error) {
+//
+// roots 是可选的内核 root-action 通道：给了就顺带回读 kore_waf input 链并填 Chain
+// （waf.rules.chain[]，内置 4 条 + 自定义，带 builtin 布尔）。chain 与引擎无关——
+// 宿主没装 WAF 引擎时数据面照样要有值，否则 UI 拿不到 builtin 标记（P1，0.4.4）。
+func ListRules(env Environment, settings Settings, detection Detection, roots ...RootActionFunc) (RulesResult, error) {
 	env = defaultEnvironment(env)
 	s := settings.normalized()
 	result := RulesResult{Engine: detection.Engine, RuleSets: []RuleSet{}}
+	result.Chain = readChain(env, firstRoot(roots))
 	if detection.Engine == EngineNone || !detection.Found {
 		result.Engine = EngineNone
 		result.Available = false
@@ -52,6 +57,34 @@ func ListRules(env Environment, settings Settings, detection Detection) (RulesRe
 		result.Hint = "检测到 " + detection.Engine + "，但未在规则目录中找到可统计的规则文件；可在插件设置里补充「规则目录」"
 	}
 	return result, nil
+}
+
+// firstRoot 取可选 root-action 通道（未注入时为 nil）。
+func firstRoot(roots []RootActionFunc) RootActionFunc {
+	if len(roots) == 0 {
+		return nil
+	}
+	return roots[0]
+}
+
+// readChain 回读 kore_waf input 链上的规则（复用 ruleadmin.go 的三层解析
+// parseChainRules：rule.comment → expr[].comment → 特征识别）。
+//
+// 数据面不可用或解析失败时降级为空链而不是报错：引擎规则集（rulesets）不该被
+// nft 通道问题一起打挂，原始 nft 规则列表仍在 nft.rules 里（UI 老路径兜底）。
+func readChain(env Environment, root RootActionFunc) []ChainRule {
+	if root == nil {
+		return []ChainRule{}
+	}
+	backend := NewNftBackend(env, root)
+	if !backend.Availability().Available {
+		return []ChainRule{}
+	}
+	rules, err := backend.nftChainRules()
+	if err != nil || rules == nil {
+		return []ChainRule{}
+	}
+	return rules
 }
 
 // modsecRuleDirs 返回 ModSecurity / Coraza 的规则目录：配置优先，否则内置缺省。

@@ -1,3 +1,24 @@
+## 0.4.4 — 2026-11-23
+
+### 修复（真机 e2e 抓出的 P1 / P3）
+
+- **P1 · `waf.rules.chain` 恒为 `null`**：`internal/wafop/types.go` 声明了 `Chain []ChainRule`，
+  但 `ListRules` 从不赋值，`waf.rules` 的 `chain` 永远返回空——UI 拿到空数组后走 `nft.rules`
+  降级分支，「内置」徽标与内置行的删除按钮禁用**永不生效**（用户看不到哪条是内置的，点了才被后端 400 拦）。
+  现在 `ListRules` 接受可选 root-action 通道并回读 `kore_waf input` 链，`chain[]` 带 `builtin` 布尔
+  （内置 4 条用既有特征识别：`@banned4` / `@banned6` / `kore_syn4` / `ct count`）。
+  **复用** 0.4.3 修好的三层解析 `parseChainRules`（`rule.comment` → `expr[].comment` → 特征识别），
+  没有第二套解析实现；`nft.rules[]` 降级字段保留，老路径不受影响。
+  chain 与引擎解耦：宿主没装 WAF 引擎时照样有值；数据面不可用时降级为空数组而不是打挂引擎规则集。
+- **P3 · 回读链里自定义规则 `expr` 为空串**：`rule.add` / `rule.remove` / `rule.toggle` 返回的
+  `chain[]` 中自定义规则只有 name/action，`expr` 是 `""`（前端显示空白行）。现在按 nft `-j` 的
+  `expr[]` 反解出可读匹配条件（`ip saddr 10.20.0.0/16`、`tcp dport 8443`、`tcp dport { 80, 443 }`），
+  支持 payload 匹配 / `ct count over N` / 集合 / CIDR；认不出的结构以 `raw:{...}` 保留原文，
+  **绝不返回空串**；新增 `expr_tokens`（原始 token 数）便于核对是否完整反解。
+- 测试：用本机 nft 1.1.6 在私有 netns（`unshare -rn`）采集的真实 `nft -j list table inet kore_waf`
+  输出做 fixture（`internal/wafop/testdata/nft-list-116-mixed.json`：4 条内置 + 2 条自定义），
+  断言 `chain` 长度 == nft 规则数、内置 4 条 `builtin=true`、自定义规则 `expr` 非空且带 token 数。
+
 ## 0.4.3 — 2026-11-23
 
 ### 修复（已发版缺陷）

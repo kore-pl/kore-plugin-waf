@@ -11,6 +11,7 @@ package wafop
 //   - 装配层只拼「已校验的 token 序列」，形状由内核 RootCommandPolicies 二次兜底。
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -28,6 +29,9 @@ type ChainRule struct {
 	Enabled bool   `json:"enabled"`
 	Builtin bool   `json:"builtin"`
 	Handle  int    `json:"handle,omitempty"`
+	// ExprTokens 是 nft 里该规则的原始 expr token 数：Expr 只还原「匹配条件」，
+	// counter/log 等语句不进 Expr，保留 token 数便于核对是否完整反解。
+	ExprTokens int `json:"expr_tokens,omitempty"`
 }
 
 // builtinRule 是内置基础防护规则的模板（与 info.json 的 nft-mode-* 对应）。
@@ -307,8 +311,19 @@ func parseChainRules(stdout []byte, wantChain string) ([]ChainRule, error) {
 					builtin = true
 				}
 			}
-			rules = append(rules, ChainRule{Name: name, Action: verdict, Enabled: true,
-				Builtin: builtin, Handle: rule.Handle})
+			// 自定义规则必须还原出可读 expr（如 `tcp dport 8443`）：0.4.3 只填 name/action，
+			// 回读链里自定义规则的 expr 为空串，前端显示空白行（P3，0.4.4 修）。
+			expr := renderRuleExpr(rule.Expr)
+			if builtin {
+				if candidate, ok := builtinByName(name); ok {
+					expr = candidate.Expr
+				}
+			}
+			if strings.TrimSpace(expr) == "" {
+				expr = "（无匹配条件，" + strconv.Itoa(len(rule.Expr)) + " 个 nft token）"
+			}
+			rules = append(rules, ChainRule{Name: name, Expr: expr, Action: verdict, Enabled: true,
+				Builtin: builtin, Handle: rule.Handle, ExprTokens: len(rule.Expr)})
 			continue
 		}
 		// 内置规则没有 comment：按 expr 里的特征 token 识别，保证 chain 能列出 4 条内置规则。
@@ -355,4 +370,160 @@ func builtinByTokens(exprs []json.RawMessage) (string, bool) {
 		return "conn-rate", true
 	}
 	return "", false
+}
+
+// renderRuleExpr 把 nft `-j` 的 expr[] 反解成可读表达式（如 `tcp dport 8443`）。
+//
+// 只还原「匹配条件」：payload 匹配、ct count、set/prefix 字面量；
+// counter / log / comment / drop / accept 不进 expr（动作由 Action 字段单独报）。
+// 认不出的结构以 `raw:{...}` 形式保留原文，**绝不返回空串**——空 expr 会让前端显示空白行，
+// 比给不完整信息更糟。返回的 token 数由调用方按 len(exprs) 记入 ChainRule.ExprTokens。
+func renderRuleExpr(exprs []json.RawMessage) string {
+	parts := make([]string, 0, len(exprs))
+	for _, raw := range exprs {
+		var piece map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &piece); err != nil {
+			parts = append(parts, "raw:"+compactJSON(raw))
+			continue
+		}
+		switch {
+		case hasAnyKey(piece, "counter", "log", "comment", "drop", "accept"):
+			continue // 计数/日志/注释/动作不属于匹配条件
+		case hasAnyKey(piece, "match"):
+			if text, ok := renderMatch(piece["match"]); ok {
+				parts = append(parts, text)
+				continue
+			}
+			parts = append(parts, "raw:"+compactJSON(raw))
+		case hasAnyKey(piece, "ct count"):
+			parts = append(parts, renderCtCount(piece["ct count"]))
+		default:
+			parts = append(parts, "raw:"+compactJSON(raw))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// renderMatch 还原一条 `match` 语句：`<left> [op] <right>`（== / in 不写操作符）。
+func renderMatch(raw json.RawMessage) (string, bool) {
+	var match struct {
+		Op    string          `json:"op"`
+		Left  json.RawMessage `json:"left"`
+		Right json.RawMessage `json:"right"`
+	}
+	if err := json.Unmarshal(raw, &match); err != nil {
+		return "", false
+	}
+	left, ok := renderPayload(match.Left)
+	if !ok {
+		return "", false
+	}
+	right, ok := renderValue(match.Right)
+	if !ok {
+		return "", false
+	}
+	switch match.Op {
+	case "==", "in":
+		return left + " " + right, true
+	case "!=", ">", ">=", "<", "<=":
+		return left + " " + match.Op + " " + right, true
+	}
+	return "", false
+}
+
+// renderPayload 还原 `payload` 左值：`ip saddr` / `tcp dport` / `tcp flags`。
+// nft 的左值是嵌套的 `{"payload":{"protocol":…,"field":…}}`（不是平铺）。
+func renderPayload(raw json.RawMessage) (string, bool) {
+	var left struct {
+		Payload struct {
+			Protocol string `json:"protocol"`
+			Field    string `json:"field"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(raw, &left); err != nil {
+		return "", false
+	}
+	if left.Payload.Protocol == "" || left.Payload.Field == "" {
+		return "", false
+	}
+	return left.Payload.Protocol + " " + left.Payload.Field, true
+}
+
+// renderValue 还原右值：标量 / 集合 `{ 80, 443 }` / CIDR `10.20.0.0/16`。
+func renderValue(raw json.RawMessage) (string, bool) {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		if text == "" {
+			return "", false
+		}
+		return text, true
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		return number.String(), true
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return "", false
+	}
+	if setRaw, ok := object["set"]; ok {
+		var elems []json.RawMessage
+		if json.Unmarshal(setRaw, &elems) == nil {
+			items := make([]string, 0, len(elems))
+			for _, elem := range elems {
+				value, ok := renderValue(elem)
+				if !ok {
+					return "", false
+				}
+				items = append(items, value)
+			}
+			if len(items) > 0 {
+				return "{ " + strings.Join(items, ", ") + " }", true
+			}
+		}
+	}
+	if prefixRaw, ok := object["prefix"]; ok {
+		var prefix struct {
+			Addr string `json:"addr"`
+			Len  int    `json:"len"`
+		}
+		if json.Unmarshal(prefixRaw, &prefix) == nil && prefix.Addr != "" {
+			return prefix.Addr + "/" + strconv.Itoa(prefix.Len), true
+		}
+	}
+	return "", false
+}
+
+// renderCtCount 还原 `ct count over 200`。
+func renderCtCount(raw json.RawMessage) string {
+	var count struct {
+		Val int  `json:"val"`
+		Inv bool `json:"inv"`
+	}
+	if err := json.Unmarshal(raw, &count); err != nil {
+		return "ct count"
+	}
+	if count.Inv {
+		return "ct count over " + strconv.Itoa(count.Val)
+	}
+	return "ct count " + strconv.Itoa(count.Val)
+}
+
+// hasAnyKey 判断对象里是否存在任一给定键（nft 用 null 表示动作，不能靠值判断）。
+func hasAnyKey(fields map[string]json.RawMessage, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := fields[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// compactJSON 压缩原始 JSON；压缩失败时退回原文（只用于 raw: 兜底展示）。
+func compactJSON(raw json.RawMessage) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err == nil && buf.Len() > 0 {
+		return buf.String()
+	}
+	return string(raw)
 }

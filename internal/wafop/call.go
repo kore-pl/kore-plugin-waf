@@ -175,7 +175,7 @@ func (r *Runtime) callRules(raw json.RawMessage) (json.RawMessage, *pluginapi.Er
 	if err != nil {
 		return nil, classify(err)
 	}
-	result, err := ListRules(r.env, settings, detection)
+	result, err := ListRules(r.env, settings, detection, r.root)
 	if err != nil {
 		return nil, classify(err)
 	}
