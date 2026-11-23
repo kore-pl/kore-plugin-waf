@@ -17,7 +17,7 @@
 
 **已验证 / 未验证（诚实披露）**：本机无任何运行中的 WAF 引擎，检测与解析用构造文件 + 上游 OWASP CRS 真实规则文件验证
 （缩进感知口径 187 条，与独立 grep 逐文件一致）；docker 拉取 modsecurity 镜像失败，未获得真实发行版布局证据；
-`waf.toggle` 成功路径未在真 root + 真引擎下验证（内核侧 `Options.PluginAuth` 尚未在 `cmd/kored` 装配）。详见 README §8。
+`waf.toggle` 成功路径未在真 root + 真引擎下验证（本机非 root、polkit 拒绝 `systemd-run --uid=0`）。详见 README §8。
 
 ## 0.1.1 (2026-11-23)
 

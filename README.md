@@ -151,9 +151,10 @@ make build && make dist
 2. 尝试 `docker pull owasp/modsecurity-crs:4-nginx-alpine` 验证真实发行版布局，本机镜像源不可用（拉取失败），
    故没有"真实引擎/真实发行版布局"的运行时证据。
 3. `waf.toggle` 的**成功路径未在真 root + 真引擎下验证**：
-   - 本机非 root 且无可用提权通道 → 只验证了拒绝路径（`E_NEED_ROOT` / `E_UNAUTHORIZED`）与单测里的模拟通道成功路径；
-   - 内核侧 `Options.PluginAuth`（插件 bearer 鉴权）当前未在 `cmd/kored` 装配，属内核待补项，
-     即使真 root 下插件经通道调用也会被内核 401 拒绝——需与内核 `root-action` 通道联调后复验。
+   - 本机非 root（uid=1000、无有效 capability、`NoNewPrivs=1`）且无运行引擎 → 只验证了拒绝路径
+     （`E_NEED_ROOT` / `E_UNAUTHORIZED`）与单测里的模拟通道成功路径；
+   - 内核侧 root-action 通道已具备并装配插件 bearer 鉴权（`cmd/kored/serve_boot.go` 的 `PluginAuth`），
+     但本机 `systemd-run --uid=0` 被 polkit 拒绝，无法完成端到端提权实测——需真 root + 真引擎联调后复验。
 4. 深层 include 链、Apache modsecurity 的 reload、crowdsec 日志解析、规则启用/停用的真实生效性均未覆盖。
 
 ## 9. 打包与可复现
