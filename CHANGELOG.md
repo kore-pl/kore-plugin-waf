@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 (2026-11-23)
+
+- test: 新增 `TestMethodCapabilitiesCoverBusinessVerbs`（method_capabilities 一致性表：声明 ⊆ 实现、反向断言、条数相等、取值在允许能力集合内、info/manifest 版本一致），满足 PLUGIN-MATURITY §3.5 #12
+- 说明：0.4.1（`201635ab…` / 2934045）发布进行中、**作废不改**；测试会改变 dist，故按 RELEASE §0 升 0.4.2
+
+
 ## 0.4.1 (2026-11-23)
 
 - build(deps): `pluginapi v0.1.3 → v0.1.5`（v0.1.5 含 ADR-0022 增补的两条 nft 受控形状）；**干净依赖下 `TestInfoJSONRootActionsSchema` 与 `TestMethodCapabilitiesCoverBusinessVerbs` 真绿**（不再依赖本地 replace）
