@@ -165,8 +165,9 @@ make build && make dist
 **未验证 / 明确不假装**：
 
 1. 本机**没有任何运行中的 WAF 引擎**（无 modsecurity/naxsi/coraza/crowdsec、无 nginx），引擎平面仍是"构造文件 + 上游真实 CRS 规则文件"验证。
-2. **`ipset` 后端未实现**：本机无 `ipset` 二进制，无法做真实验证；kore 的形状表已按固定形状放开 `ipset`
-   （`create/add/del/test/list/destroy`），但插件当前只用 nft。接 ipset 前必须先补隔离验证。
+2. **`ipset` 后端未实现，且内核形状表已按裁决移除 `ipset`**（命令数 14 → 13）：插件只用 nft 集合，
+   保留一个零消费者的特权命令只增加攻击面。将来真要接 ipset（例如只有 ipset 的旧宿主），
+   必须先在内核补回形状 + 自带 ipset 的隔离环境验证，再改本插件。
 3. **未在真 root kored 下跑完端到端**：本会话以非 root 用户运行，root-action 通道的拒绝路径（`E_NEED_ROOT`）已验证，
    成功路径的**内核侧**由 kore `internal/core/privilege` 的 root 集成测试覆盖（需 root 环境才执行，否则 skip）；
    插件侧 nft 命令的真实性由上面的 netns 验证覆盖。二者拼起来才等于"真 root 端到端"，本轮未在同一进程链里跑通。

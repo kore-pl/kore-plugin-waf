@@ -22,6 +22,13 @@
   协议错误，`waf.toggle` 能据此区分「对象不存在」「语法不支持」「权限拒绝」
 - test: nft 假后端（有状态）+ 真实 `nft -j` 输出 fixture（隔离 netns 采集）+ 方法面契约；故障注入四类覆盖新方法
 - build: 版本 0.2.0 → 0.3.0（feat + 破坏性方法语义变更 → minor）
+- deps: **需要内核/SDK 侧的受控命令形状表（ADR-0022），即 `pkg/pluginapi ≥ v0.1.3`**。本仓 `go.mod` 当前钉
+  `v0.1.2`，该版本的白名单只有旧的 8 个命令，因此 `TestInfoJSONRootActionsSchema`（读 info.json 的 12 条
+  `root_actions` 调 `ValidateRootAction`）会**显式 skip** 并打印需要的版本；`v0.1.3` 发布后把 require 升上去，
+  该测试自动转为真跑。SDK 版本未跟上期间，清单的字段级约束由 `TestInfoJSONRootActionsLocalSchema` 兜底，
+  形状校验由内核侧 `pkg/pluginapi` 的 nft 形状夹具覆盖。内核侧若尚未包含形状表（即提交晚于
+  `kore@f086312`），插件启用时 `nft-*` 动作会以 `E_INVALID` 被拒——此时插件按降级矩阵返回
+  「数据面不可用 + hint」，不会静默成功。
 
 **已验证 / 未验证（诚实披露）**：真实 nft（1.1.6）在 `unshare -rn` 隔离 netns 里按 info.json 的声明 argv 跑通
 建表/集合/链 → 封禁（v4/v6/超时）→ enforce/observe 切换 → 解封 → 清链 → JSON 快照，宿主
