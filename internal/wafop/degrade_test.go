@@ -102,6 +102,7 @@ func TestCallReject(t *testing.T) {
 		{"waf.logs", `{"limit":-1}`, pluginapi.E_INVALID},
 		{"waf.logs", `{"since":"yesterday"}`, pluginapi.E_INVALID},
 		{"waf.logs", `{"nope":1}`, pluginapi.E_INVALID},
+		{"waf.logs", `{"limit":5} trailing`, pluginapi.E_INVALID},
 		{"waf.rules", `{"engine":"squid"}`, pluginapi.E_INVALID},
 		{"waf.exec", `{}`, pluginapi.E_NOTFOUND},
 	}

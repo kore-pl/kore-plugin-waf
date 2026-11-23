@@ -21,7 +21,7 @@
   "depends_on": [],
   "conflicts": [],
   "scenario_tags": ["sec"],
-  "size_bytes": 2870917,
+  "size_bytes": 2871267,
   "requires_root": true,
   "root_actions": [
     {

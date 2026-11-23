@@ -2,7 +2,9 @@ package wafop
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -114,6 +116,18 @@ func decodeStrict(raw json.RawMessage, target any) *pluginapi.Error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return invalid("params 解析失败: " + err.Error())
+	}
+	if err := ensureNoTrailing(decoder); err != nil {
+		return invalid(err.Error())
+	}
+	return nil
+}
+
+// ensureNoTrailing 拒绝 JSON 对象后的多余内容（`{} garbage` 不能当合法参数）。
+func ensureNoTrailing(decoder *json.Decoder) error {
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return errors.New("params 对象后存在多余内容")
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -366,5 +367,12 @@ func decodeStrictJSON(raw json.RawMessage, target any) error {
 	}
 	decoder := json.NewDecoder(strings.NewReader(trimmed))
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("JSON 对象后存在多余内容")
+	}
+	return nil
 }
