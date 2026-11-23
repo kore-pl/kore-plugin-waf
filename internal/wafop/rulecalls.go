@@ -186,7 +186,7 @@ func (r *Runtime) applyRuleRemove(name string, fromToggle bool) (json.RawMessage
 	if _, builtin := builtinByName(name); builtin {
 		disabledBuiltins[name] = true
 	}
-	r.forgetCustom(name)
+	// 保留 registry 条目：停用（toggle off）后还能 toggle on 恢复同一 expr。
 	return r.ruleResult(name, "remove", true, after)
 }
 

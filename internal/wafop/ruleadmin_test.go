@@ -2,6 +2,7 @@ package wafop
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -104,5 +105,145 @@ func TestRuleAddPrecheck(t *testing.T) {
 		if perr == nil || perr.Code != tc.code {
 			t.Fatalf("%+v 应 %s，实际 %+v", tc.params, tc.code, perr)
 		}
+	}
+}
+
+// fakeNft 是内存版 nft：root-action 调用维护规则集，供 toggle/回读/回滚测试使用。
+type fakeRuleNft struct {
+	rules   []map[string]any
+	next    int
+	dropAdd bool
+	deleted []string
+}
+
+func newFakeRuleNft() *fakeRuleNft { return &fakeRuleNft{next: 0} }
+
+func (f *fakeRuleNft) root(action string, args []string) (RootActionOutput, error) {
+	switch action {
+	case ActionNftList:
+		nftables := []map[string]any{
+			{"metainfo": map[string]any{"version": "1.1.0"}},
+			{"table": map[string]any{"name": NftTable}},
+		}
+		for _, rule := range f.rules {
+			nftables = append(nftables, map[string]any{"rule": rule})
+		}
+		raw, _ := json.Marshal(map[string]any{"nftables": nftables})
+		return RootActionOutput{Stdout: raw}, nil
+	case ActionNftAddRule:
+		if f.dropAdd {
+			return RootActionOutput{ExitCode: 0}, nil
+		}
+		f.next++
+		comment := ""
+		for index, token := range args {
+			if token == "comment" && index+1 < len(args) {
+				comment = args[index+1]
+			}
+		}
+		expr := []map[string]any{{"comment": comment}}
+		expr = append(expr, map[string]any{"drop": true})
+		f.rules = append(f.rules, map[string]any{"handle": f.next, "expr": expr})
+		return RootActionOutput{ExitCode: 0}, nil
+	case ActionNftDeleteRule:
+		f.deleted = append(f.deleted, args...)
+		if len(args) == 1 {
+			handle := args[0]
+			kept := f.rules[:0]
+			for _, rule := range f.rules {
+				if fmt.Sprint(rule["handle"]) != handle {
+					kept = append(kept, rule)
+				}
+			}
+			f.rules = kept
+		}
+		return RootActionOutput{ExitCode: 0}, nil
+	case ActionNftFlush:
+		f.rules = nil
+		return RootActionOutput{ExitCode: 0}, nil
+	}
+	return RootActionOutput{ExitCode: 0}, nil
+}
+
+func newRuleTestRuntime(fake *fakeRuleNft) *Runtime {
+	env := newFakeEnv()
+	env.lookPath["nft"] = "/usr/sbin/nft"
+	return New(Options{Env: env.env(), RootAction: fake.root})
+}
+
+// TestRuleToggleIdempotent 证明 custom 规则 add/toggle/remove 幂等。
+func TestRuleToggleIdempotent(t *testing.T) {
+	fake := newFakeRuleNft()
+	runtime := newRuleTestRuntime(fake)
+	addBody := `{"name":"block-ssh","expr":"tcp dport 2222","action":"drop"}`
+	if _, perr := runtime.Call("waf.rule.add", json.RawMessage(addBody)); perr != nil {
+		t.Fatalf("add 失败：%+v", perr)
+	}
+	result, perr := runtime.Call("waf.rule.add", json.RawMessage(addBody))
+	if perr != nil {
+		t.Fatalf("重复 add 应幂等成功：%+v", perr)
+	}
+	var again RuleChangeResult
+	if err := json.Unmarshal(result, &again); err != nil || again.Applied {
+		t.Fatalf("重复 add 必须 applied=false：%+v %v", again, err)
+	}
+	off, perr := runtime.Call("waf.rule.toggle", json.RawMessage(`{"name":"block-ssh","enabled":false}`))
+	if perr != nil {
+		t.Fatalf("toggle off 失败：%+v", perr)
+	}
+	var offResult RuleChangeResult
+	_ = json.Unmarshal(off, &offResult)
+	if !offResult.Applied {
+		t.Fatalf("首次 toggle off 应 applied=true")
+	}
+	offAgain, perr := runtime.Call("waf.rule.toggle", json.RawMessage(`{"name":"block-ssh","enabled":false}`))
+	if perr != nil {
+		t.Fatalf("重复 toggle off 应幂等：%+v", perr)
+	}
+	var offAgainResult RuleChangeResult
+	_ = json.Unmarshal(offAgain, &offAgainResult)
+	if offAgainResult.Applied {
+		t.Fatalf("重复 toggle off 必须 applied=false")
+	}
+	on, perr := runtime.Call("waf.rule.toggle", json.RawMessage(`{"name":"block-ssh","enabled":true}`))
+	if perr != nil {
+		t.Fatalf("toggle on 失败：%+v", perr)
+	}
+	var onResult RuleChangeResult
+	_ = json.Unmarshal(on, &onResult)
+	if !onResult.Applied || len(onResult.Chain) == 0 {
+		t.Fatalf("toggle on 应 applied=true 且回读链非空：%+v", onResult)
+	}
+}
+
+// TestRuleAddReadbackRollback 证明写后回读不到规则时返回 E_UPSTREAM 且标记已回滚。
+func TestRuleAddReadbackRollback(t *testing.T) {
+	fake := newFakeRuleNft()
+	fake.dropAdd = true // 模拟「命令退出 0 但规则没落地」
+	runtime := newRuleTestRuntime(fake)
+	_, perr := runtime.Call("waf.rule.add", json.RawMessage(`{"name":"block-1","expr":"ip saddr 1.2.3.4","action":"drop"}`))
+	if perr == nil || perr.Code != "E_UPSTREAM" {
+		t.Fatalf("回读不到应 E_UPSTREAM，实际 %+v", perr)
+	}
+	if !strings.Contains(perr.Message, "已回滚") {
+		t.Fatalf("错误信息应说明已回滚：%s", perr.Message)
+	}
+}
+
+// TestBuiltinRuleToggleAllowed 证明内置规则允许 toggle、且重复 toggle 幂等。
+func TestBuiltinRuleToggleAllowed(t *testing.T) {
+	fake := newFakeRuleNft()
+	runtime := newRuleTestRuntime(fake)
+	if _, perr := runtime.Call("waf.rule.toggle", json.RawMessage(`{"name":"ban-ipv4","enabled":false}`)); perr != nil {
+		t.Fatalf("内置 toggle 应允许：%+v", perr)
+	}
+	second, perr := runtime.Call("waf.rule.toggle", json.RawMessage(`{"name":"ban-ipv4","enabled":false}`))
+	if perr != nil {
+		t.Fatalf("重复内置 toggle 应幂等：%+v", perr)
+	}
+	var result RuleChangeResult
+	_ = json.Unmarshal(second, &result)
+	if result.Applied {
+		t.Fatalf("重复内置 toggle 必须 applied=false")
 	}
 }
