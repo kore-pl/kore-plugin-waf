@@ -1,0 +1,58 @@
+name: 功能建议
+description: 提出本插件的新能力或改进建议
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先说明真实场景与当前替代方案；只写"希望支持 X"的建议无法评估。
+        涉及协议或 `info.json` 方法表的改动，需要在 kore 仓先有 ADR。
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 需求场景
+      description: 谁在什么场景下需要它？现在怎么解决？痛点是什么？
+      placeholder: |
+        作为 ...，我希望 ...，以便 ...
+        目前的做法是 ...，痛点是 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: 当前替代方案
+      description: 现在用什么替代？为什么不够用？
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 期望的调用方式 / 返回值 / 界面行为；能写清边界条件更好。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: 影响面
+      options:
+        - 仅本插件内部实现，不改方法表与 capabilities
+        - 新增 RPC 方法（不改协议）
+        - 新增或扩大 capabilities
+        - 需要协议 / info.json schema 变更（须 kore 仓 ADR）
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 相关 issue、日志、截图或参考实现。
+    validations:
+      required: false

@@ -1,0 +1,118 @@
+name: Bug 报告
+description: 报告可复现的缺陷（安全漏洞请勿公开提交，见 SECURITY.md）
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索是否已有同类 issue。
+        **安全漏洞不要开公开 issue**，请按 [SECURITY.md](SECURITY.md) 私下报告。
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      description: 本插件 `info.json.version`，或 `dist/` 产物文件名里的版本号。
+      placeholder: "0.3.1"
+    validations:
+      required: true
+
+  - type: input
+    id: kore-version
+    attributes:
+      label: kore 版本
+      description: 主壳版本（`kored version` 输出）；本插件声明的 `requires_kore` 为 `>=0.1.0 <0.2.0`。
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 系统与发行版
+      description: 发行版 + 内核版本，例如 Ubuntu 26.04 / Linux 6.17.0。
+      placeholder: "Ubuntu 26.04, Linux 6.17.0-xx-generic"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: 安装方式
+      options:
+        - 商店安装（从索引下载）
+        - 手动安装（本地 tar.gz）
+        - 源码构建（make build）
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 最小可复现步骤，按 1. 2. 3. 写清楚；能稳定复现最好。
+      placeholder: |
+        1. 启动 kored ...
+        2. 调用 waf.<method> ...
+        3. 观察到 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 包含错误码（如 E_INVALID / E_UNAUTHORIZED）与完整报错原文。
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 报错原文
+      description: 关键日志与堆栈。**请先脱敏，不要贴口令、token、私钥或用户数据。**
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: capabilities
+    attributes:
+      label: 本插件的 capabilities
+      description: 粘贴 `info.json` 的 `capabilities` 数组，便于判断是否与授权面相关。
+      placeholder: '["system:read"]'
+    validations:
+      required: false
+
+  - type: dropdown
+    id: tried-restart
+    attributes:
+      label: 是否已尝试重启 / 重装
+      options:
+        - 已重启 kored，问题仍在
+        - 已重装插件，问题仍在
+        - 都已尝试，问题仍在
+        - 尚未尝试
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 检查清单
+      options:
+        - label: 我已搜索现有 issue，确认不是重复报告
+          required: true
+        - label: 我已阅读 SECURITY.md，确认这不是需要私下披露的安全漏洞
+          required: true
+        - label: 我已对日志与配置脱敏，未包含口令 / token / 私钥
+          required: true

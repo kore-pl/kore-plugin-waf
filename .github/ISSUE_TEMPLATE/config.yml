@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞披露
+    url: https://github.com/kore-pl/kore-plugin-waf/blob/main/SECURITY.md
+    about: 发现漏洞请不要开公开 issue，按本仓 SECURITY.md 私下报告。
+  - name: 协议与 SDK 文档
+    url: https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-SDK.md
+    about: 插件协议、SDK 与生命周期说明在 kore 仓 docs。
+  - name: 插件索引问题
+    url: https://github.com/kore-pl/kore-plugins
+    about: 索引条目、版本与安装包 sha256 不一致请提到索引仓。

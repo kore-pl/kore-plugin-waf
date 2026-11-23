@@ -1,0 +1,49 @@
+name: CI
+
+# 与 kore 同一策略（2026-11-23）：CI 少执行——push main / tag v* / PR / 手动。
+# 日常反馈在本地：gofmt -l + go vet + go test + make dist 两跑 sha 一致。
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: vet + test + dist（可复现）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+      - name: dist 可复现（两次 sha 一致）
+        run: |
+          make dist
+          a=$(sha256sum dist/*.tar.gz | awk '{print $1}')
+          make dist
+          b=$(sha256sum dist/*.tar.gz | awk '{print $1}')
+          test "$a" = "$b" || { echo "dist sha 漂移: $a != $b"; exit 1; }
+      - name: 开源九件套自检
+        run: |
+          for f in CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md AGENTS.md \
+                   .github/PULL_REQUEST_TEMPLATE.md .github/ISSUE_TEMPLATE/bug_report.yml \
+                   .github/ISSUE_TEMPLATE/feature_request.yml .github/ISSUE_TEMPLATE/config.yml \
+                   .github/workflows/ci.yml; do
+            test -f "$f" || { echo "缺 $f"; exit 1; }
+          done
