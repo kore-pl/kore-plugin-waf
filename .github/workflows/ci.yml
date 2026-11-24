@@ -36,6 +36,15 @@ jobs:
       - name: make check
         run: make check
 
+      # CI 里必须显式看到 -race：只对 ./tests/boundary/ 跑（并发断言面）。
+      # 与 make check 内的 race 段同源（kore/scripts/race-gate-sync.sh 渲染），
+      # 双保险：check 段被误删时这一步仍会以 -race 跑边界用例。
+      - name: make race (-race 仅 tests/boundary)
+        # 独立执行、不受前序 step 红绿影响：make check 若先因 gofmt / 存量问题失败，
+        # race 仍必须真跑（-race 证据不能被别的门禁吞掉）；job 整体仍按失败计。
+        if: always()
+        run: make race
+
       - name: make build
         run: make build
 
