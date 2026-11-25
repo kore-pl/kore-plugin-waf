@@ -1,7 +1,7 @@
 {
   "id": "waf",
   "name": "WAF 插件",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "protocol": "kore.plugin.v1",
   "lifecycle": "lazy",
   "depth_level": "basic",
@@ -36,7 +36,7 @@
   "scenario_tags": [
     "sec"
   ],
-  "size_bytes": 2947541,
+  "size_bytes": 2947451,
   "requires_root": true,
   "root_actions": [
     {
