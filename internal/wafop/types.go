@@ -114,19 +114,22 @@ type Detection struct {
 // 两个平面分开报：engine 是宿主已装的 WAF 引擎（modsecurity/naxsi/…，只读探测），
 // backend 是 kore 自己用 nft 落的封禁数据面（可写，经 root-action 通道）。
 type StatusResult struct {
-	Available     bool          `json:"available"`
-	Engine        string        `json:"engine"`
-	Version       string        `json:"version,omitempty"`
-	VersionSource string        `json:"version_source,omitempty"`
-	RulesCount    int           `json:"rules_count"`
-	Mode          string        `json:"mode"`
-	ModeSource    string        `json:"mode_source,omitempty"`
-	CRSVersion    string        `json:"crs_version,omitempty"`
-	ErrorCode     string        `json:"error_code,omitempty"`
-	Hint          string        `json:"hint,omitempty"`
-	RequiresRoot  bool          `json:"requires_root"`
-	Probed        []Probe       `json:"probed,omitempty"`
-	Backend       StatusBackend `json:"backend"`
+	Available     bool   `json:"available"`
+	Engine        string `json:"engine"`
+	Version       string `json:"version,omitempty"`
+	VersionSource string `json:"version_source,omitempty"`
+	RulesCount    int    `json:"rules_count"`
+	Mode          string `json:"mode"`
+	ModeSource    string `json:"mode_source,omitempty"`
+	// Level 是数据面实际生效的防护等级（loose/standard/strict；空串=未启用）。
+	// 从链上回读推断，不是配置值——配置与事实不一致时以事实为准。
+	Level        string        `json:"level,omitempty"`
+	CRSVersion   string        `json:"crs_version,omitempty"`
+	ErrorCode    string        `json:"error_code,omitempty"`
+	Hint         string        `json:"hint,omitempty"`
+	RequiresRoot bool          `json:"requires_root"`
+	Probed       []Probe       `json:"probed,omitempty"`
+	Backend      StatusBackend `json:"backend"`
 }
 
 // RuleSet 是一个规则集（通常对应一个 .conf / .rules 文件，crowdsec 下对应一个场景）。

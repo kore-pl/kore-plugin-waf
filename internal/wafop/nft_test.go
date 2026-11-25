@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,9 @@ type fakeNft struct {
 	chain   bool
 	sets    map[string][]NftElement
 	rules   []NftRule
+	// ruleTokens 记录每条规则的 nft token（按 handle），让 stateJSON 能产出现实的
+	// expr 结构——等级/内置识别依赖这些 token 签名，只有 verdict 的假规则测不出来。
+	ruleTokens map[int][]string
 
 	// exitFor / stderrFor 让指定动作失败（模拟权限、语法不支持、对象缺失）。
 	exitFor   map[string]int
@@ -30,7 +34,8 @@ type fakeNft struct {
 
 // newFakeNft 返回初始为空的 nft 后端（表不存在）。
 func newFakeNft() *fakeNft {
-	return &fakeNft{sets: map[string][]NftElement{}, exitFor: map[string]int{}, stderrFor: map[string]string{}}
+	return &fakeNft{sets: map[string][]NftElement{}, exitFor: map[string]int{}, stderrFor: map[string]string{},
+		ruleTokens: map[int][]string{}}
 }
 
 // nftEnv 返回「装了 nft」的假环境（backend 只用 LookPath 判断工具是否存在）。
@@ -75,11 +80,53 @@ func (f *fakeNft) Call(action string, args []string) (RootActionOutput, error) {
 		}
 		f.chain = true
 	case ActionNftModeEnforce:
-		f.rules = fakeRules("drop")
+		f.setModeRules(ModeEnforce)
 	case ActionNftModeObserve:
-		f.rules = fakeRules("observe")
+		f.setModeRules(ModeObserve)
 	case ActionNftFlush:
 		f.rules = nil
+		f.ruleTokens = map[int][]string{}
+	case ActionNftAddRule:
+		tokens := append([]string{}, args...)
+		handle := 1
+		for _, rule := range f.rules {
+			if rule.Handle >= handle {
+				handle = rule.Handle + 1
+			}
+		}
+		verdict := "observe"
+		for _, token := range tokens {
+			if token == "drop" {
+				verdict = "drop"
+			}
+			if token == "accept" {
+				verdict = "accept"
+			}
+		}
+		f.rules = append(f.rules, NftRule{Handle: handle, Summary: strings.Join(tokens, " "), Verdict: verdict, HasCount: true})
+		f.ruleTokens[handle] = tokens
+	case ActionNftDeleteRule:
+		if len(args) == 0 {
+			return RootActionOutput{ExitCode: 1, Stderr: []byte("Error: missing handle")}, nil
+		}
+		handle, convErr := strconv.Atoi(args[0])
+		if convErr != nil {
+			return RootActionOutput{ExitCode: 1, Stderr: []byte("Error: bad handle")}, nil
+		}
+		kept := f.rules[:0]
+		found := false
+		for _, rule := range f.rules {
+			if rule.Handle == handle {
+				found = true
+				continue
+			}
+			kept = append(kept, rule)
+		}
+		if !found {
+			return RootActionOutput{ExitCode: 1, Stderr: []byte("Error: no such file or directory")}, nil
+		}
+		f.rules = kept
+		delete(f.ruleTokens, handle)
 	case ActionNftBan4, ActionNftBan6:
 		set := NftSetV4
 		if action == ActionNftBan6 {
@@ -135,19 +182,22 @@ func alreadyExists() RootActionOutput {
 	return RootActionOutput{ExitCode: 1, Stderr: []byte("Error: File exists")}
 }
 
-// fakeRules 构造一个模式的四条规则（verdict 为 drop 或 observe）。
-func fakeRules(verdict string) []NftRule {
-	summaries := []string{
-		"ip saddr == @banned4 → counter → " + verdict,
-		"ip6 saddr == @banned6 → counter → " + verdict,
-		"tcp flags == syn → tcp dport == {80, 443} → @kore_syn4 limit rate over 60/second → counter → " + verdict,
-		"tcp dport == {80, 443} → ct count over 200 → counter → " + verdict,
+// setModeRules 按模式装载 4 条基础规则（token 取自内置模板，保证回读能识别）。
+func (f *fakeNft) setModeRules(mode string) {
+	f.rules = make([]NftRule, 0, len(builtinRules))
+	f.ruleTokens = map[int][]string{}
+	for index, builtin := range builtinRules {
+		handle := index + 1
+		tokens := builtinTokensFor(builtin, mode)
+		verdict := "observe"
+		for _, token := range tokens {
+			if token == "drop" {
+				verdict = "drop"
+			}
+		}
+		f.rules = append(f.rules, NftRule{Handle: handle, Summary: strings.Join(tokens, " "), Verdict: verdict, HasCount: true})
+		f.ruleTokens[handle] = tokens
 	}
-	rules := make([]NftRule, 0, len(summaries))
-	for index, summary := range summaries {
-		rules = append(rules, NftRule{Handle: index + 1, Summary: summary, Verdict: verdict, HasCount: true})
-	}
-	return rules
 }
 
 // elementFromArgs 从追加参数里解出集合元素（`{ <ip> [timeout <ttl>] }`）。
@@ -194,17 +244,42 @@ func (f *fakeNft) stateJSON() []byte {
 		entry["elem"] = items
 		objects = append(objects, map[string]any{"set": entry})
 	}
-	for index, rule := range f.rules {
-		expr := []any{map[string]any{"counter": map[string]any{
-			"packets": rule.Packets, "bytes": rule.Bytes}}}
-		switch rule.Verdict {
-		case "drop":
-			expr = append(expr, map[string]any{"drop": nil})
-		case "accept":
-			expr = append(expr, map[string]any{"accept": nil})
+	for _, rule := range f.rules {
+		expr := make([]any, 0, 8)
+		if tokens, ok := f.ruleTokens[rule.Handle]; ok && len(tokens) > 0 {
+			// 有 token 就按 token 渲染：cfg token 变成 counter / drop / log，其余作为
+			// 原始匹配片段保留（parseChainRules 靠这些签名识别内置规则与等级）。
+			for index := 0; index < len(tokens); index++ {
+				switch tokens[index] {
+				case "counter":
+					expr = append(expr, map[string]any{"counter": map[string]any{
+						"packets": rule.Packets, "bytes": rule.Bytes}})
+				case "drop":
+					expr = append(expr, map[string]any{"drop": nil})
+				case "accept":
+					expr = append(expr, map[string]any{"accept": nil})
+				case "log":
+					prefix := ""
+					if index+2 < len(tokens) && tokens[index+1] == "prefix" {
+						prefix = tokens[index+2]
+					}
+					expr = append(expr, map[string]any{"log": map[string]any{"prefix": prefix}})
+				default:
+					expr = append(expr, map[string]any{"raw": tokens[index]})
+				}
+			}
+		} else {
+			expr = append(expr, map[string]any{"counter": map[string]any{
+				"packets": rule.Packets, "bytes": rule.Bytes}})
+			switch rule.Verdict {
+			case "drop":
+				expr = append(expr, map[string]any{"drop": nil})
+			case "accept":
+				expr = append(expr, map[string]any{"accept": nil})
+			}
 		}
 		objects = append(objects, map[string]any{"rule": map[string]any{
-			"family": "inet", "table": NftTable, "chain": NftChain, "handle": index + 1,
+			"family": "inet", "table": NftTable, "chain": NftChain, "handle": rule.Handle,
 			"expr": expr,
 		}})
 	}
@@ -272,8 +347,15 @@ func TestNftApplyModeEnforceObserveOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重复下发应成功：%v", err)
 	}
-	if len(root.calls) != callsBefore+1 {
-		t.Fatalf("同模式应短路（只多一次回读），实际多 %d 次：%v", len(root.calls)-callsBefore, root.calls[callsBefore:])
+	// 幂等短路：不再下发写动作；只读回读 1–2 次（模式一次 + 等级取证一次）。
+	extra := root.calls[callsBefore:]
+	for _, call := range extra {
+		if !strings.HasPrefix(call, ActionNftList+" ") {
+			t.Fatalf("同模式应短路，不得再下发写动作：%v", extra)
+		}
+	}
+	if len(extra) > 2 {
+		t.Fatalf("同模式短路回读次数异常（%d 次）：%v", len(extra), extra)
 	}
 	if !again.Applied || !again.Verified {
 		t.Fatalf("幂等短路结果不符：%+v", again)

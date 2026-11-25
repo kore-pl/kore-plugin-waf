@@ -281,22 +281,48 @@ func ModeRuleCountFor(mode string) int {
 	return 0
 }
 
-// ApplyMode 切换数据面模式：observe / enforce 重装规则集，off 清空链。
-//
-// 不把「动作退出 0」当成「模式已生效」：执行后回读规则条数与 verdict，任一不符都
-// 如实返回 applied=false 并附原因（规则集可能处于「已清链但未装完」的中间态）。
+// ApplyMode 切换数据面模式（标准等级）：等价于 ApplyLevel(mode, LevelStandard)。
 func (b *NftBackend) ApplyMode(mode string) (ModeResult, error) {
-	result := ModeResult{Mode: mode, Rules: []NftRule{}, Steps: []NftStep{}}
+	return b.ApplyLevel(mode, LevelStandard)
+}
+
+// ApplyLevel 切换数据面「模式 + 防护等级」。
+//
+//	observe / enforce：清链后重装该模式的 4 条基础规则；等级再调整覆盖面
+//	  - standard：就是这 4 条
+//	  - loose   ：删掉扫描限速与并发上限，只留封禁名单
+//	  - strict  ：再追加「无效连接状态丢弃」与「SSH 暴力破解限速」两条
+//	off：清空链（不删表/集合）
+//
+// 不把「动作退出 0」当成「已生效」：执行后回读模式、等级与规则条数，任一不符都
+// 如实返回 applied=false 并附原因（规则集可能处于「已清链但未装完」的中间态）。
+func (b *NftBackend) ApplyLevel(mode, level string) (ModeResult, error) {
+	if level == "" {
+		level = LevelStandard
+	}
+	result := ModeResult{Mode: mode, Level: level, Rules: []NftRule{}, Steps: []NftStep{}}
 	state, err := b.State()
 	if err != nil {
 		return result, err
 	}
 	result.PreviousMode = state.Mode
-	if state.Mode == mode {
+	currentLevel := b.currentLevel(state)
+	result.PreviousLevel = currentLevel
+
+	if mode == ModeOff {
+		return b.applyOff(state, result)
+	}
+	switch mode {
+	case ModeObserve, ModeEnforce:
+	default:
+		return result, NewOpError(OpFailed, "未知模式 "+mode)
+	}
+	wantRules := LevelRuleCountFor(level)
+	if state.Mode == mode && currentLevel == level && len(state.Rules) == wantRules {
 		result.Applied = true
 		result.Verified = true
 		result.Rules = state.Rules
-		result.Hint = "当前已是 " + mode + " 模式，未执行任何提权动作"
+		result.Hint = "当前已是「" + modeText(mode) + " / " + LevelText(level) + "」，未执行任何提权动作"
 		return result, nil
 	}
 	if !state.Present {
@@ -306,47 +332,145 @@ func (b *NftBackend) ApplyMode(mode string) (ModeResult, error) {
 			return result, err
 		}
 	}
-	action := ActionNftFlush
-	switch mode {
-	case ModeObserve:
-		action = ActionNftModeObserve
-	case ModeEnforce:
+	action := ActionNftModeObserve
+	if mode == ModeEnforce {
 		action = ActionNftModeEnforce
-	case ModeOff:
-		action = ActionNftFlush
-	default:
-		return result, NewOpError(OpFailed, "未知模式 "+mode)
 	}
-	output, err := b.call(action, nil)
-	step := NftStep{Action: action, ExitCode: output.ExitCode, OK: err == nil}
-	if err != nil {
-		if commandErr, ok := err.(*NftCommandError); ok {
-			step.Detail = trimLine([]byte(commandErr.Stderr), 300)
-			result.Steps = append(result.Steps, step)
-			if looksLikeNftUnsupported(commandErr.Stderr) {
-				return result, NewOpError(OpCgroup,
-					"当前 nft 版本不支持规则集里的语法（meter / ct count / log level）："+step.Detail)
-			}
-			return result, commandErr
-		}
+	if err := b.runStep(&result, action, nil); err != nil {
 		return result, err
 	}
-	result.Steps = append(result.Steps, step)
-	// 回读校验：模式与规则条数都要对上。
+	if err := b.adjustLevel(&result, mode, level); err != nil {
+		// 等级调整失败时链仍处在该模式的基础规则上：如实报未验证 + 可操作提示。
+		result.Hint = "基础防护已下发，但等级调整未完成（" + err.Error() + "）；可重试切换到该等级"
+		return result, nil
+	}
+	after, err := b.State()
+	if err != nil {
+		return result, err
+	}
+	actualLevel := b.currentLevel(after)
+	result.Rules = after.Rules
+	result.Verified = after.Mode == mode && actualLevel == level && len(after.Rules) == wantRules
+	if !result.Verified {
+		result.Hint = fmt.Sprintf("规则已下发但回读不一致（期望 %s / %s / %d 条，实际 %s / %s / %d 条）；"+
+			"链可能处于中间态，请重试或检查 nft 版本", mode, level, wantRules,
+			after.Mode, levelLabel(actualLevel), len(after.Rules))
+		return result, nil
+	}
+	result.Applied = true
+	return result, nil
+}
+
+// applyOff 关闭防护：清空链（表与封禁集合保留，重新开启立即生效）。
+func (b *NftBackend) applyOff(state NftState, result ModeResult) (ModeResult, error) {
+	result.Level = ""
+	if !state.Present || (state.Mode == ModeOff && len(state.Rules) == 0) {
+		result.Applied = true
+		result.Verified = true
+		result.Rules = state.Rules
+		result.Hint = "当前已是关闭状态，未执行任何提权动作"
+		return result, nil
+	}
+	if err := b.runStep(&result, ActionNftFlush, nil); err != nil {
+		return result, err
+	}
 	after, err := b.State()
 	if err != nil {
 		return result, err
 	}
 	result.Rules = after.Rules
-	wantRules := ModeRuleCountFor(mode)
-	result.Verified = after.Mode == mode && len(after.Rules) == wantRules
+	result.Verified = after.Mode == ModeOff && len(after.Rules) == 0
 	if !result.Verified {
-		result.Hint = fmt.Sprintf("规则已下发但回读不一致（期望 %s / %d 条，实际 %s / %d 条）；"+
-			"链可能处于中间态，请重试或检查 nft 版本", mode, wantRules, after.Mode, len(after.Rules))
+		result.Hint = "清链已执行但回读仍有规则；链可能处于中间态，请重试"
 		return result, nil
 	}
+	result.Hint = "防护已关闭（封禁名单保留但不生效）；重新开启时按标准等级下发"
 	result.Applied = true
 	return result, nil
+}
+
+// runStep 执行一条 root 动作并记入 steps；失败按 nft 错误类别归一。
+func (b *NftBackend) runStep(result *ModeResult, action string, args []string) error {
+	output, err := b.call(action, args)
+	step := NftStep{Action: action, ExitCode: output.ExitCode, OK: err == nil}
+	if err != nil {
+		commandErr, ok := err.(*NftCommandError)
+		if !ok {
+			return err
+		}
+		step.Detail = trimLine([]byte(commandErr.Stderr), 300)
+		result.Steps = append(result.Steps, step)
+		if looksLikeNftUnsupported(commandErr.Stderr) {
+			return NewOpError(OpCgroup,
+				"当前 nft 版本不支持规则集里的语法（meter / ct count / log level）："+step.Detail)
+		}
+		return commandErr
+	}
+	result.Steps = append(result.Steps, step)
+	return nil
+}
+
+// adjustLevel 在已下发的基础规则上把链调整到目标等级。
+func (b *NftBackend) adjustLevel(result *ModeResult, mode, level string) error {
+	switch level {
+	case LevelStrict:
+		for _, extra := range strictExtraRules {
+			if err := b.runStep(result, ActionNftAddRule, builtinTokensFor(extra, mode)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case LevelLoose:
+		chain, err := b.nftChainRules()
+		if err != nil {
+			return err
+		}
+		for _, name := range []string{"syn-rate", "conn-rate"} {
+			target, found := findChainRule(chain, name)
+			if !found || target.Handle <= 0 {
+				continue
+			}
+			if err := b.runStep(result, ActionNftDeleteRule, []string{fmt.Sprint(target.Handle)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+// modeText / LevelText / levelLabel 是给用户看的中文短名（不暴露内部枚举）。
+func modeText(mode string) string {
+	switch mode {
+	case ModeObserve:
+		return "只记录不拦截"
+	case ModeEnforce:
+		return "直接拦截"
+	case ModeOff:
+		return "已关闭"
+	}
+	return "未知模式"
+}
+
+// LevelText 是等级的中文名。
+func LevelText(level string) string {
+	switch level {
+	case LevelLoose:
+		return "宽松"
+	case LevelStandard:
+		return "标准"
+	case LevelStrict:
+		return "严格"
+	}
+	return "未启用"
+}
+
+// levelLabel 把空串显示成「未启用」，其余同 LevelText。
+func levelLabel(level string) string {
+	if level == "" {
+		return "未启用"
+	}
+	return LevelText(level)
 }
 
 // looksLikeNftUnsupported 报告「nft 版本不支持该语法」类错误。
@@ -824,13 +948,15 @@ type BansResult struct {
 
 // ModeResult 是 waf.toggle 的结果。
 type ModeResult struct {
-	Mode         string    `json:"mode"`
-	PreviousMode string    `json:"previous_mode"`
-	Applied      bool      `json:"applied"`
-	Verified     bool      `json:"verified"`
-	Hint         string    `json:"hint,omitempty"`
-	Rules        []NftRule `json:"rules"`
-	Steps        []NftStep `json:"steps"`
+	Mode          string    `json:"mode"`
+	PreviousMode  string    `json:"previous_mode"`
+	Level         string    `json:"level"`
+	PreviousLevel string    `json:"previous_level"`
+	Applied       bool      `json:"applied"`
+	Verified      bool      `json:"verified"`
+	Hint          string    `json:"hint,omitempty"`
+	Rules         []NftRule `json:"rules"`
+	Steps         []NftStep `json:"steps"`
 }
 
 // StatusBackend 是 waf.status 里的数据面子对象。
@@ -842,6 +968,7 @@ type StatusBackend struct {
 	Chain      string `json:"chain"`
 	Present    bool   `json:"present"`
 	Mode       string `json:"mode"`
+	Level      string `json:"level"`
 	Banned     int    `json:"banned_count"`
 	RulesCount int    `json:"rules_count"`
 	Reason     string `json:"reason,omitempty"`

@@ -1,3 +1,35 @@
+## 0.5.0 — 2026-11-25
+
+### 新增（防护等级 · 对标宝塔/1Panel 的 WAF 等级与规则可见可管）
+
+- **`waf.toggle.level`：宽松 / 标准 / 严格 三档防护等级**。等级在**同一模式**下调整内置防护覆盖面：
+  `loose` 只留封禁名单 2 条、`standard` 现有 4 条、`strict` 追加 `ct state invalid counter drop`
+  与 SSH 暴破限速（`tcp dport 22`，每源 10/min 突发 20），共 6 条。
+  **不新增 root 动作**（协议单插件上限 16 条已用满）：等级复用 `nft-add-rule` / `nft-delete-rule`，
+  仍是同一条受控通道 + 同一条审计链（ADR-0018 / ADR-0022）。
+- **`waf.status.level` / `waf.toggle.level` 从链上回读推断**：先按规则名，其次按规则特征 token，
+  最后按条数 2/4/6 兜底——等级是数据面事实而非配置值，插件或内核重启后不会与事实漂移。
+- **切模式沿用当前等级**：`waf.toggle` 不带 `level` 时不改变等级；`off` 清链后等级归零，重新开启按标准。
+
+### 修复（规则重建的形态丢失）
+
+- **拦截模式重建会悄悄降级成只记录**：`waf.rule.toggle` 的 `rebuildChain` 固定使用观察模式 token
+  （`counter log`），在 `enforce` 模式下停用/启用任一内置规则都会把整链变成只记录——现在按**当前模式与
+  等级**重装（模式/等级由最近一次成功下发记录，缺失时从链回读推断）。
+- **内置规则模板参数残缺**：`builtinRules` 的 `syn-rate` / `conn-rate` token 缺 `meter ... limit rate`
+  与 `ct count over N` 参数，重建后会把「限速规则」装成全量日志规则；本次按 `info.json` 的 argv 逐 token 对齐，
+  并补 `EnforceTokens`（拦截模式 drop / 观察模式 log）。
+- **`ct count` 链识别补老形态**：除 `"ct count"` 对象，也接受摊平成 `ct` / `count` 两个 token 的输出，
+  避免内建规则在某些 nft 版本上回读不出名字（等级判定与宽松降级依赖该识别）。
+
+### 测试
+
+- 新增 `internal/wafop/level_test.go`：等级归一与非法值、`LevelFromChain` 表驱动（含自定义规则不干扰）、
+  严格 / 宽松真实下发路径（6 / 2 条 + 回读校验 + `nft-add-rule` / `nft-delete-rule` 调用）、
+  切模式沿用等级、`waf.status` 报告等级。
+- `fakeNft` 改为按 token 渲染 `nft -j` 规则结构（此前只有 verdict，等级与内置识别无从测起），
+  并模拟 `nft-add-rule` / `nft-delete-rule`；幂等断言从「回读次数」改为「不得再下发写动作」。
+
 ## 0.4.5 — 2026-11-24
 
 ### 元数据（depth_level 校正，非功能变更）

@@ -2,7 +2,8 @@
 
 WAF 管理插件（**L1.5+ · 引擎无关 + 真实 nft 数据面**）：
 两层职责分开——**引擎层**只读探测宿主已装的 WAF 引擎（modsecurity / naxsi / coraza / crowdsec）并统计规则、解析拦截日志；
-**数据面**由 kore 自己用 `nft` 落地（封禁集合 / SYN 扫描限速 / 单 IP 并发上限），支持 `observe`（只记录）与 `enforce`（阻断）切换。
+**数据面**由 kore 自己用 `nft` 落地（封禁集合 / SYN 扫描限速 / 单 IP 并发上限），支持 `observe`（只记录）与 `enforce`（阻断）切换，
+以及 **宽松 / 标准 / 严格** 三档防护等级（0.5.0 起：等级只调整内置防护覆盖面，复用同一套 root 动作）。
 本仓**不内置任何 WAF 引擎**，也**不在插件进程里 exec nft**：一切写操作都经 ADR-0018 的 root-action 通道（ADR-0022 锁死命令形状）。
 
 - 协议：`kore.plugin.v1`，`lifecycle=lazy`，`depth_level=basic`
@@ -14,10 +15,10 @@ WAF 管理插件（**L1.5+ · 引擎无关 + 真实 nft 数据面**）：
 
 | 方法 | 入参 | 结果要点 |
 | --- | --- | --- |
-| `waf.status` | `{}` | 引擎平面：`available / engine / version / rules_count / mode(on\|off\|detection) / probed`；数据面：`backend{tool,available,channel,table,chain,present,mode,banned_count,rules_count}` |
+| `waf.status` | `{}` | 引擎平面：`available / engine / version / rules_count / mode(on\|off\|detection) / probed`；等级：`level(loose\|standard\|strict，空=未启用)`；数据面：`backend{tool,available,channel,table,chain,present,mode,level,banned_count,rules_count}` |
 | `waf.rules` | `{engine?}` | 引擎规则集 `rulesets[] / total` + 数据面 `nft{table,chain,present,mode,rules[{handle,summary,verdict,packets,bytes}],bans_count}` |
 | `waf.logs` | `{limit?, since?, rule_id?, engine?}` | `sources[] / entries[{time,ip,uri,rule_id,action}] / count / limit / scanned_lines` |
-| `waf.toggle` | `{mode: observe\|enforce\|off, confirm?}` | `previous_mode / mode / applied / verified / rules[] / steps[]`；`off` 必须 `confirm=true` |
+| `waf.toggle` | `{mode: observe\|enforce\|off, level?: loose\|standard\|strict, confirm?}` | `previous_mode / mode / previous_level / level / applied / verified / rules[] / steps[]`；`off` 必须 `confirm=true`；不传 `level` 时沿用链上当前等级 |
 | `waf.ban` | `{ip, ttl_s?, reason?}` | `ip / family / set / ttl_s / banned / steps[]`（幂等；`ttl_s=0` 永久，60–2592000） |
 | `waf.unban` | `{ip}` | `ip / set / removed / steps[]`（不在集合里也算成功） |
 | `waf.bans` | `{limit?}` | `present / mode / count / bans[{ip,timeout_s,expires_s,set}]` |
@@ -113,6 +114,24 @@ table inet kore_waf            # 表
 `observe` 模式用同一组规则，但 verdict 换成 `counter log prefix kore-waf-*`（只计数 + 记日志，不阻断）。
 阈值写死在 `info.json` 的 argv 里（argv 变了 dist sha 就变），因此**不是运行期配置项**——改阈值等于发新版本。
 
+### 防护等级（0.5.0 起）
+
+等级在**同一模式**下调整内置防护的覆盖面，不新增 root 动作（协议单插件最多 16 条，本仓已用满；
+等级复用 `nft-add-rule` / `nft-delete-rule`，仍走同一条受控通道与审计）：
+
+| 等级 | 内置规则条数 | 覆盖 |
+| --- | --- | --- |
+| `loose`（宽松） | 2 | 只有封禁名单（v4/v6），不装扫描限速与并发上限——排障或大促期间临时放宽 |
+| `standard`（标准） | 4 | 上面四条基础防护（缺省） |
+| `strict`（严格） | 6 | 标准 4 条 + `ct state invalid counter drop`（畸形连接）+ `tcp dport 22` SSH 暴力破解限速（每源 10/min，突发 20） |
+
+- **等级是数据面事实，不是配置值**：`waf.status.level` / `waf.toggle.level` 从 `kore_waf` 链回读推断
+  （先按规则名，其次按规则特征，最后按条数 2/4/6），插件重启或内核重启都不会与事实漂移。
+- **切模式不会偷偷改等级**：`waf.toggle` 不带 `level` 时沿用当前链上等级。
+- **关闭防护后等级归零**：`off` 清链，重新开启按 `standard` 下发（想固定严格请在开启时带 `level=strict`）。
+- **规则重建保持形态**：`waf.rule.toggle` 重建链时按当前模式与等级重装（0.5.0 修：以前固定用观察模式
+  token 重装，会把拦截模式悄悄降级成只记录，且 syn-rate/conn-rate 模板缺 meter/limit 参数）。
+
 | action | 用途 |
 | --- | --- |
 | `nft-init-table` / `nft-init-set4` / `nft-init-set6` / `nft-init-chain` | 建表 / 集合 / base chain（`nft add` 对同定义幂等） |
@@ -122,8 +141,8 @@ table inet kore_waf            # 表
 | `nft-unban4` / `nft-unban6` | 追加参数 `{ <ip> }` 移除元素 |
 | `nft-list` | `nft -j list table inet kore_waf`，供状态与回读校验 |
 
-流程（`waf.toggle`）：参数/确认 → nft 与通道可用性 → 同模式短路（不提权）→ 必要时初始化 → 下发 → **回读校验**
-（模式与规则条数都要对上，否则 `applied=false` + 原因）。`waf.ban` 同样是「下发 → 回读集合确认元素在」，
+流程（`waf.toggle`）：参数/确认 → nft 与通道可用性 → 同模式同等级短路（不提权）→ 必要时初始化 → 下发基础规则
+→ 按等级增删内置规则 → **回读校验**（模式、等级与规则条数都要对上，否则 `applied=false` + 原因）。`waf.ban` 同样是「下发 → 回读集合确认元素在」，
 不把退出码 0 当成功。全部动作 `irreversible:false`：`enforce` 可回 `observe`/`off`，封禁可 `unban`。
 
 > 0.2.0 的 `modsec-set-mode`（`sed -i` 改模式文件）已**删除**：root 执行 `sed -i <任意表达式> <任意文件>`

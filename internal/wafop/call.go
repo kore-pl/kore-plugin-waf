@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/pengtang1024/kore/pkg/pluginapi"
@@ -26,6 +27,25 @@ type Runtime struct {
 	settings Settings
 	root     RootActionFunc
 	registry *ruleRegistry
+	// mu 保护 dataMode / dataLevel：方法面可能被并发调用（插件 socket 上是并发请求），
+	// 这两个值只记录「最近一次成功下发的模式与等级」，供规则重建时保持形态。
+	mu        sync.Mutex
+	dataMode  string
+	dataLevel string
+}
+
+// setDataState 记录最近一次成功下发的模式与等级。
+func (r *Runtime) setDataState(mode, level string) {
+	r.mu.Lock()
+	r.dataMode, r.dataLevel = mode, level
+	r.mu.Unlock()
+}
+
+// dataState 返回最近一次成功下发的模式与等级（空串表示未知）。
+func (r *Runtime) dataState() (string, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.dataMode, r.dataLevel
 }
 
 // New 构造 Runtime；Env 缺省字段补真实实现，Settings 补齐缺省值。
@@ -150,6 +170,8 @@ func (r *Runtime) callStatus(raw json.RawMessage) (json.RawMessage, *pluginapi.E
 		Probed:        detection.Probed,
 		Backend:       Status(r.env, r.root),
 	}
+	// 等级取数据面事实（链上回读），缺省为空串表示未启用。
+	result.Level = result.Backend.Level
 	if !detection.Found {
 		result.ErrorCode = pluginapi.E_UNSUPPORTED
 		result.Hint = installHint()
@@ -242,6 +264,15 @@ func (r *Runtime) callToggle(raw json.RawMessage) (json.RawMessage, *pluginapi.E
 	result, perr := Toggle(r.env, p, r.root)
 	if perr != nil {
 		return nil, perr
+	}
+	// 只记录「真的下发成功」的形态：失败/未验证时留空，规则重建回落到链上回读，
+	// 不让一次失败的模式切换把重建依据改错。
+	if result.Applied && result.Verified {
+		if result.Mode == ModeOff {
+			r.setDataState(ModeOff, "")
+		} else {
+			r.setDataState(result.Mode, result.Level)
+		}
 	}
 	return encode(result)
 }

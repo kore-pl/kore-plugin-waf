@@ -222,7 +222,31 @@ func (r *Runtime) toggleBuiltin(rule builtinRule, enabled bool) (json.RawMessage
 }
 
 // rebuildChain 清空并按「已启用内置 + 已登记自定义」重装规则。
+//
+// 重建必须保持**当前模式与等级**：内置规则在拦截模式是 counter drop、观察模式是
+// counter log；strict 等级还要补回追加项。老实现固定用观察模式的 token 重装，
+// 导致「在拦截模式下停用一条规则」会把整链悄悄降级成只记录（0.5.0 修）。
 func (r *Runtime) rebuildChain() error {
+	mode, level := r.dataState()
+	if mode == "" || level == "" {
+		if chain, err := r.nftBackend().nftChainRules(); err == nil {
+			if mode == "" {
+				mode = modeFromChain(chain)
+			}
+			if level == "" {
+				level = LevelFromChain(chain)
+				if level == "" {
+					level = LevelStandard
+				}
+			}
+		}
+	}
+	if mode == "" {
+		mode = ModeObserve
+	}
+	if level == "" {
+		level = LevelStandard
+	}
 	if _, err := r.root(ActionNftFlush, nil); err != nil {
 		return err
 	}
@@ -230,10 +254,25 @@ func (r *Runtime) rebuildChain() error {
 		if disabledBuiltins[builtin.Name] {
 			continue
 		}
-		if output, err := r.root(ActionNftAddRule, builtin.Tokens); err != nil {
+		if level == LevelLoose && (builtin.Name == "syn-rate" || builtin.Name == "conn-rate") {
+			continue
+		}
+		if output, err := r.root(ActionNftAddRule, builtinTokensFor(builtin, mode)); err != nil {
 			return err
 		} else if output.ExitCode != 0 {
 			return fmt.Errorf("重装内置规则 %s 失败（退出码 %d）", builtin.Name, output.ExitCode)
+		}
+	}
+	if level == LevelStrict {
+		for _, extra := range strictExtraRules {
+			if disabledBuiltins[extra.Name] {
+				continue
+			}
+			if output, err := r.root(ActionNftAddRule, builtinTokensFor(extra, mode)); err != nil {
+				return err
+			} else if output.ExitCode != 0 {
+				return fmt.Errorf("重装内置规则 %s 失败（退出码 %d）", extra.Name, output.ExitCode)
+			}
 		}
 	}
 	for _, name := range r.registryOrder() {

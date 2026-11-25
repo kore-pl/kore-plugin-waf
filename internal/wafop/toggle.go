@@ -20,6 +20,9 @@ import (
 type ToggleParams struct {
 	// Mode 目标模式：observe | enforce | off。
 	Mode string `json:"mode"`
+	// Level 目标等级：loose | standard | strict；不传按当前链上的实际等级，
+	// 无法推断时按 standard（老客户端不带该字段时行为不变）。
+	Level string `json:"level"`
 	// Confirm 关闭防护（mode=off）时必须为 true。
 	Confirm bool `json:"confirm"`
 }
@@ -37,14 +40,26 @@ func Toggle(env Environment, params ToggleParams, root RootActionFunc) (ModeResu
 		return ModeResult{}, unauthorized("关闭防护会放开全部流量（封禁名单保留但不生效）",
 			"确认关闭请带 confirm=true 重试；只想观察不阻断请用 mode=observe")
 	}
+	level, perr := NormalizeLevel(params.Level)
+	if perr != nil {
+		return ModeResult{}, perr
+	}
 	backend := NewNftBackend(env, root)
 	availability := backend.Availability()
 	if !availability.Available {
 		// 工具缺失属于「环境不支持」，返回结构化不可用（不报协议错误）。
-		return ModeResult{Mode: mode, Rules: []NftRule{}, Steps: []NftStep{},
+		return ModeResult{Mode: mode, Level: level, Rules: []NftRule{}, Steps: []NftStep{},
 			Hint: availability.Hint}, nil
 	}
-	result, err := backend.ApplyMode(mode)
+	// 不传 level 时沿用当前链上的实际等级：模式切换不该悄悄改掉用户选的等级。
+	if strings.TrimSpace(params.Level) == "" {
+		if chain, chainErr := backend.nftChainRules(); chainErr == nil {
+			if derived := LevelFromChain(chain); derived != "" {
+				level = derived
+			}
+		}
+	}
+	result, err := backend.ApplyLevel(mode, level)
 	if err != nil {
 		return result, classifyToggleChannel(err)
 	}
@@ -90,6 +105,7 @@ func Status(env Environment, root RootActionFunc) StatusBackend {
 	status.Mode = state.Mode
 	status.Banned = len(state.Bans)
 	status.RulesCount = len(state.Rules)
+	status.Level = backend.currentLevel(state)
 	if !state.Present {
 		status.Hint = "数据面尚未初始化：调用 waf.toggle（mode=observe|enforce）或 waf.ban 会自动建表"
 	}

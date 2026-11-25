@@ -39,29 +39,45 @@ type builtinRule struct {
 	Name   string
 	Expr   string
 	Action string
+	// Tokens 是观察模式（counter log）的 token 序列；历史字段，保持原义。
 	Tokens []string
+	// EnforceTokens 是拦截模式（counter drop）的 token 序列；空表示与 Tokens 相同
+	// （历史内置规则在 info.json 里按模式各有一份固定 argv，这里只补 strict 追加项）。
+	EnforceTokens []string
 }
 
 // builtinRules 是 4 条内置规则；顺序即装载顺序。
+//
+// Tokens 是**观察模式**（counter log，无 verdict）的 token 序列，EnforceTokens 是拦截
+// 模式（counter drop）。两者都必须与 info.json 的 nft-mode-* argv 等价——0.5.0 之前
+// Tokens 只是「差不多」的残片（syn-rate/conn-rate 缺 meter/limit 与 ct count 参数），
+// 规则重建会把限速规则装成全量日志规则；本次随等级功能一并修正。
 var builtinRules = []builtinRule{
 	{Name: "ban-ipv4", Expr: "ip saddr @banned4", Action: "drop",
-		Tokens: []string{"ip", "saddr", "@banned4", "counter", "drop"}},
+		Tokens:        []string{"ip", "saddr", "@banned4", "counter", "log", "prefix", "kore-waf-ban4"},
+		EnforceTokens: []string{"ip", "saddr", "@banned4", "counter", "drop"}},
 	{Name: "ban-ipv6", Expr: "ip6 saddr @banned6", Action: "drop",
-		Tokens: []string{"ip6", "saddr", "@banned6", "counter", "drop"}},
-	{Name: "syn-rate", Expr: "tcp flags syn tcp dport { 80, 443 } meter kore_syn4", Action: "observe",
-		Tokens: []string{"tcp", "flags", "syn", "tcp", "dport", "{", "80,", "443", "}", "counter", "log", "prefix", "kore-waf-scan"}},
+		Tokens:        []string{"ip6", "saddr", "@banned6", "counter", "log", "prefix", "kore-waf-ban6"},
+		EnforceTokens: []string{"ip6", "saddr", "@banned6", "counter", "drop"}},
+	{Name: "syn-rate", Expr: "tcp flags syn tcp dport { 80, 443 } meter kore_syn4 { ip saddr limit rate over 60/second burst 120 packets }",
+		Action: "observe",
+		Tokens: []string{"tcp", "flags", "syn", "tcp", "dport", "{", "80,", "443", "}", "meter", "kore_syn4",
+			"{", "ip", "saddr", "limit", "rate", "over", "60/second", "burst", "120", "packets", "}",
+			"counter", "log", "prefix", "kore-waf-scan"},
+		EnforceTokens: []string{"tcp", "flags", "syn", "tcp", "dport", "{", "80,", "443", "}", "meter", "kore_syn4",
+			"{", "ip", "saddr", "limit", "rate", "over", "60/second", "burst", "120", "packets", "}",
+			"counter", "drop"}},
 	{Name: "conn-rate", Expr: "tcp dport { 80, 443 } ct count over 200", Action: "observe",
-		Tokens: []string{"tcp", "dport", "{", "80,", "443", "}", "ct", "count", "over", "200", "counter", "log", "prefix", "kore-waf-conn"}},
+		Tokens:        []string{"tcp", "dport", "{", "80,", "443", "}", "ct", "count", "over", "200", "counter", "log", "prefix", "kore-waf-conn"},
+		EnforceTokens: []string{"tcp", "dport", "{", "80,", "443", "}", "ct", "count", "over", "200", "counter", "drop"}},
 }
 
-// builtinByName 返回内置模板。
+// builtinByName 返回内置模板（含 strict 等级追加的两条）。
+//
+// 注意 builtinRules 只含标准 4 条：它同时是「标准等级规则集」与旧测试的
+// 数量基准。strict 追加项在 level.go 的 strictExtraRules 里。
 func builtinByName(name string) (builtinRule, bool) {
-	for _, rule := range builtinRules {
-		if rule.Name == name {
-			return rule, true
-		}
-	}
-	return builtinRule{}, false
+	return builtinTemplateByName(name)
 }
 
 // ruleParams 是 rule.add / rule.remove / rule.toggle 的入参。
@@ -306,7 +322,7 @@ func parseChainRules(stdout []byte, wantChain string) ([]ChainRule, error) {
 		if strings.HasPrefix(comment, ruleCommentPrefix) {
 			name := strings.TrimPrefix(comment, ruleCommentPrefix)
 			builtin := false
-			for _, candidate := range builtinRules {
+			for _, candidate := range allBuiltinRules() {
 				if candidate.Name == name {
 					builtin = true
 				}
@@ -326,19 +342,20 @@ func parseChainRules(stdout []byte, wantChain string) ([]ChainRule, error) {
 				Builtin: builtin, Handle: rule.Handle, ExprTokens: len(rule.Expr)})
 			continue
 		}
-		// 内置规则没有 comment：按 expr 里的特征 token 识别，保证 chain 能列出 4 条内置规则。
+		// 内置规则没有 comment：按 expr 里的特征 token 识别，保证 chain 能列出内置规则
+		// （标准 4 条 + strict 等级追加的 2 条）。
 		if name, ok := builtinByTokens(rule.Expr); ok {
-			verdict = "drop"
-			if name == "syn-rate" || name == "conn-rate" {
+			if _, known := builtinTemplateByName(name); !known {
+				continue
+			}
+			// 限速类与 strict 追加项在观察模式下没有 drop 动作：按实际 verdict 报，
+			// 不硬编码成 drop（否则观察模式的链会被显示成「拦截」）。
+			if verdict == "" {
 				verdict = "observe"
 			}
-			for _, candidate := range builtinRules {
-				if candidate.Name == name {
-					rules = append(rules, ChainRule{Name: name, Expr: candidate.Expr, Action: verdict,
-						Enabled: true, Builtin: true, Handle: rule.Handle})
-					break
-				}
-			}
+			candidate, _ := builtinTemplateByName(name)
+			rules = append(rules, ChainRule{Name: name, Expr: candidate.Expr, Action: verdict,
+				Enabled: true, Builtin: true, Handle: rule.Handle})
 		}
 	}
 	// 兜底：JSON 里明明有规则对象、却一条 kore 规则都没解析出来 → 显式 E_UPSTREAM（不静默当空）。
@@ -366,8 +383,17 @@ func builtinByTokens(exprs []json.RawMessage) (string, bool) {
 		return "ban-ipv6", true
 	case strings.Contains(joined, "kore_syn4"):
 		return "syn-rate", true
-	case strings.Contains(joined, `"ct count"`) || (strings.Contains(joined, `"ct":`) && strings.Contains(joined, "count")):
+	case strings.Contains(joined, "kore_ssh4"):
+		return "ssh-rate", true
+	case strings.Contains(joined, `"ct count"`),
+		strings.Contains(joined, "ct") && strings.Contains(joined, "count"):
+		// 老 nft 把 ct count 摊平成 ct / count 两个 token，新版是 `"ct count"` 对象：
+		// 两种形态都要认（只作用于无 comment 的内置规则，自定义规则走 comment 分支）。
 		return "conn-rate", true
+	case strings.Contains(joined, "ct state invalid"):
+		return "invalid-state", true
+	case strings.Contains(joined, `"ct":`) && strings.Contains(joined, "invalid"):
+		return "invalid-state", true
 	}
 	return "", false
 }
