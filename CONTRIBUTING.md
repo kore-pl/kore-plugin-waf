@@ -1,6 +1,6 @@
 # 贡献指南（CONTRIBUTING）
 
-本仓库是 **kore** 的「WAF 插件」插件：id `waf`，生命周期 `lazy`，深度等级 `basic`（核心路径可用；边界用例延 v1.1，非功能降级），协议 `kore.plugin.v1`，`requires_kore` 为 `>=0.1.0 <0.2.0`。它独立成仓：独立版本线、独立 CI（**少触发**：push main / tag `v*` / PR / 手动，2026-11-23 策略：CI 少执行）、独立发版。日常验证用本地 `make check`；发布前跑两次 `make dist` 核对 sha 一致。内核与协议仓库 `kore` 的改动不在本仓做。
+本仓库是 **kore** 的「WAF 插件」插件：id `waf`，生命周期 `lazy`，深度等级 `basic`，协议 `kore.plugin.v1`，`requires_kore` 为 `>=0.1.0 <0.2.0`。它独立成仓：独立版本线、独立 CI（**少触发**：push main / tag `v*` / PR / 手动，2026-11-23 策略：CI 少执行）、独立发版。日常验证用本地 `make check`；发布前跑两次 `make dist` 核对 sha 一致。内核与协议仓库 `kore` 的改动不在本仓做。
 
 ## 1. 能改与不能改
 
@@ -26,7 +26,7 @@
 | --- | --- |
 | `make build` | 产出 `bin/waf`（静态、`-trimpath -buildvcs=false -s -w`） |
 | `make check` | gofmt（有输出即失败）→ `go vet` → `go test -timeout 200s` |
-| `make dist` | 打包 `dist/waf-0.3.1.tar.gz` 与同名 `.sha256` |
+| `make dist` | 打包 `dist/waf-0.5.1.tar.gz` 与同名 `.sha256` |
 
 `make dist` 是**位级可复现**的：条目固定、mtime / owner / group / mode 全量归一、`gzip -9n`；同一源码在任意干净 clone、任意 umask 下重打包，sha256 必须逐字相同。包内首条目是 `info.json`（安装器先读它），随后是 `bin/waf` 与 `SHA256SUMS`。
 
@@ -43,8 +43,8 @@
 
 1. SemVer：`MAJOR.MINOR.PATCH`。`0.x` 允许破坏性变更，但必须同时有 `kore` ADR、`CHANGELOG.md` 标 `BREAKING`、`requires_kore` 区间同步。
 2. `info.json.version` 与 `manifest.json.version` **同步 bump**，`CHANGELOG.md` 记条目。
-3. 打 tag `v0.3.1`（形如 `vX.Y.Z`），推 tag 触发 release 产物。
-4. `make dist` 产出 `dist/waf-0.3.1.tar.gz` + `.sha256`；tag 的 release 附件就是这两个文件。
+3. 打 tag `v0.5.1`（形如 `vX.Y.Z`），推 tag 触发 release 产物。
+4. `make dist` 产出 `dist/waf-0.5.1.tar.gz` + `.sha256`；tag 的 release 附件就是这两个文件。
 5. 发完在 `kore-plugins` 仓更新 `index/plugins.json`（`sha256` / `size_bytes` / `download_url` 与包一致）、`versions.lock.json`（追加本版本）与 `presets/*.json`（固定版本引用）。**同一 `id@version` 只允许一个 sha，任何改变 dist sha 的改动必须 bump 版本**。
 
 ## 6. 硬约束摘要

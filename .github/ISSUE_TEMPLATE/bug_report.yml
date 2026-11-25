@@ -14,7 +14,7 @@ body:
     attributes:
       label: 插件版本
       description: 本插件 `info.json.version`，或 `dist/` 产物文件名里的版本号。
-      placeholder: "0.3.1"
+      placeholder: "0.5.1"
     validations:
       required: true
 

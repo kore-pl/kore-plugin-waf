@@ -1,12 +1,9 @@
 name: CI
 
-# 2026-11-23 策略：CI 只做兜底，少触发——push main / tag v* / PR / 手动。
-# check 是合并前必跑；oss 校验九件套与占位残留；release 只在 tag 上产出 dist。
+# 触发（2026-11-25 用户裁决）：GitHub Actions **只有 workflow_dispatch**——push（main / tag）与
+# pull_request 全部删掉，镜像侧 push / tag 绝不自动触发 GitHub CI；版本触发迁移到 Gitea Actions
+# (.gitea/workflows/ci.yml，push tag v* + 手动)。日常反馈用本地 `make check`。
 on:
-  push:
-    branches: ["main"]
-    tags: ["v*"]
-  pull_request:
   workflow_dispatch:
 
 permissions:
