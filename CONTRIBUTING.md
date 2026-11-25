@@ -62,3 +62,21 @@
 - 发现漏洞**不要开公开 issue**，按 [SECURITY.md](SECURITY.md) 私下披露。
 - 参与即表示同意 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 - 能力声明与宿主写入面（文件、进程、网络、数据库等）按真实实现写；不得声明未实现的权限，也不得在文档里承诺未实现的能力。
+
+## 8. 分支模型（Git Flow）
+
+本仓按简化的 Git Flow 协作，默认分支 `main` 保持稳定、始终可发布；日常开发在 `develop` 上进行。
+
+- **长期分支**：
+  - `main`：只接收来自 `release/*` / `hotfix/*` 的合流，每次合流对应一个 `vX.Y.Z` tag；
+  - `develop`：下一个版本的集成分支，从 `main` 切出，本地创建、不主动推送到远端。
+- **短期分支**（命名一律 kebab-case）：
+  - `feature/<短名>`：从 `develop` 切出，完成并过门禁后合回 `develop`；
+  - `fix/<短名>`：非紧急修复，同样从 `develop` 切出、合回 `develop`；
+  - `release/vX.Y.Z`：从 `develop` 切出冻结，验收通过后**双向合流**：`--no-ff` 合入 `main` 打 tag，再回灌 `develop`；
+  - `hotfix/vX.Y.Z`：从 `main` 切出的紧急修复，完成后同样**双向合流** `main` + `develop`。
+- **禁止**：不 force push、不 rebase 已发布分支、不直推 `main`、不修改远端默认分支；任何 tag 只打一次、不重签不删除。
+- **提交签名约定**：本仓使用 SSH 签名 tag（仓库级 `gpg.format=ssh`、`user.signingkey` 指向
+  `~/.ssh/id_ed25519_github_docker_panel.pub`、`tag.gpgSign=true`），允许签名者清单在
+  `.git/allowed_signers`；签名 tag 用 `git tag -s vX.Y.Z -m "中文说明"`，`git tag -v` 应显示
+  `Good "git" signature`。普通提交按 §4 用 `git commit -s` 签 DCO。
