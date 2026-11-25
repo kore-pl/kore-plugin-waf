@@ -1,3 +1,13 @@
+## 0.5.2 — 2026-11-25
+
+### 新增（开源工程标准化）
+
+- **文档本地化**：新增 `locale/zh.json` 与 `en/es/fr/de/ru/pt.json` 七语言元数据，以及 `docs/DETAIL.md` 与六个忠实译文；README 顶部加七语言切换行（简体中文优先、指向 DETAIL 文档），三者一一对应、无死链，全部 JSON 通过语法校验。仅 zh/en/es/fr/de/ru/pt 七种语言，无日语与 `ja` 文件。
+- **贡献与分支模型**：`CONTRIBUTING.md` 增补 Git Flow 分支模型（main/develop 长期分支、feature/fix/release/hotfix 短期分支 kebab-case 命名、release/hotfix 双向 `--no-ff` 合流、不 force push / rebase / push 分支）与 SSH 签名 tag 约定。
+- **安全基础设施**：新增 `.github/dependabot.yml`（gomod / github-actions / npm，每周）与 `.github/CODEOWNERS`（`* @kore-pl`）；通过 `gh api` 开启 vulnerability-alerts / automated-security-fixes / secret scanning / push protection 并回读核验（开不了的功能如实报告）。
+- **社区提示**：README 开源区新增中文自然的 ⭐ Star 求取提示。
+- 版本 bump 原因：本轮为纯文档 / 工程化变更，不改运行时行为、`info.json` 版本与 dist 包体内容；按 patch 递增并打签名 tag `v0.5.2`，历史 tag 不动、不推送。
+
 ## 0.5.1 — 2026-11-25
 
 ### 修复（文案 / 发版一致性）

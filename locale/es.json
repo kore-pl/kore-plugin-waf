@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Plugin WAF",
+    "description": "Un plugin de gestión de WAF: la capa de motor solo detecta los motores WAF ya instalados en el host (modsecurity / naxsi / coraza / crowdsec), cuenta las reglas y analiza los registros de bloqueo; el plano de datos usa nft para conjuntos de prohibición, limitación de escaneos SYN y límites de concurrencia por IP, con cambio observe/enforce y tres niveles de protección (flexible/estándar/estricto). Todas las escrituras pasan por el canal root-action; nft nunca se ejecuta en el proceso del plugin.",
+    "detail": "docs/DETAIL.es.md"
+  }
+}

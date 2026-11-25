@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Plugin WAF",
+    "description": "Um plugin de gerenciamento de WAF: a camada de mecanismo apenas detecta os mecanismos WAF já instalados no host (modsecurity / naxsi / coraza / crowdsec), conta as regras e analisa os logs de bloqueio; o plano de dados usa o nft para conjuntos de banimento, limitação de varredura SYN e limites de concorrência por IP, com alternância observe/enforce e três níveis de proteção (flexível/padrão/rigoroso). Todas as gravações passam pelo canal root-action; o nft nunca é executado no processo do plugin.",
+    "detail": "docs/DETAIL.pt.md"
+  }
+}

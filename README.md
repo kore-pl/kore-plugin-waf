@@ -1,5 +1,7 @@
 # kore-plugin-waf
 
+语言：[简体中文](docs/DETAIL.md) · [English](docs/DETAIL.en.md) · [Español](docs/DETAIL.es.md) · [Français](docs/DETAIL.fr.md) · [Deutsch](docs/DETAIL.de.md) · [Русский](docs/DETAIL.ru.md) · [Português](docs/DETAIL.pt.md)
+
 WAF 管理插件（**L1.5+ · 引擎无关 + 真实 nft 数据面**）：
 两层职责分开——**引擎层**只读探测宿主已装的 WAF 引擎（modsecurity / naxsi / coraza / crowdsec）并统计规则、解析拦截日志；
 **数据面**由 kore 自己用 `nft` 落地（封禁集合 / SYN 扫描限速 / 单 IP 并发上限），支持 `observe`（只记录）与 `enforce`（阻断）切换，
@@ -227,5 +229,7 @@ make build && make dist
 - **验证方式**：本地 `make check` 优先（GitHub CI 只手动触发，Gitea CI 按版本 tag 触发；发布前 `make dist` 连跑两次核对 sha 一致）。
 - **发布产物**：`make dist` → `dist/waf-0.5.1.tar.gz` + `.sha256`（位级可复现，连跑两次 sha 相同）。
 - **相关仓库**：[索引 kore-plugins](https://github.com/kore-pl/kore-plugins) · [协议文档](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-PROTOCOL.md) · [SDK 指南](https://github.com/kore-pl/kore/blob/main/docs/PLUGIN-SDK.md)
+
+如果你觉得这个 WAF 插件好用，欢迎给本仓库点个 ⭐ Star，让更多人看到它。
 
 <!-- oss:end -->

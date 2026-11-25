@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "WAF plugin",
+    "description": "A WAF management plugin: the engine layer only probes WAF engines already installed on the host (modsecurity / naxsi / coraza / crowdsec), counts rules and parses block logs; the data plane uses nft for ban sets, SYN scan rate limiting and per-IP concurrency caps, with observe/enforce switching and three protection levels (loose/standard/strict). All writes go through the root-action channel; nft is never executed in the plugin process.",
+    "detail": "docs/DETAIL.en.md"
+  }
+}

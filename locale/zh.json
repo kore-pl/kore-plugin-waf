@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "WAF 插件",
+    "description": "WAF 管理插件：引擎层只读探测宿主已装的 WAF 引擎（modsecurity / naxsi / coraza / crowdsec）并统计规则、解析拦截日志；数据面用 nft 落地封禁集合、SYN 扫描限速与单 IP 并发上限，支持 observe / enforce 切换与宽松 / 标准 / 严格三档防护等级。所有写操作经 root-action 通道，不在插件进程里 exec nft。",
+    "detail": "docs/DETAIL.md"
+  }
+}

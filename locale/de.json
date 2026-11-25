@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "WAF-Plugin",
+    "description": "Ein WAF-Verwaltungsplugin: Die Engine-Ebene erkennt nur auf dem Host bereits installierte WAF-Engines (modsecurity / naxsi / coraza / crowdsec), zählt Regeln und parst Blockierungs-Logs; die Datenebene nutzt nft für Sperrsets, SYN-Scan-Ratenbegrenzung und Pro-IP-Gleichzeitigkeitslimits, mit observe/enforce-Umschaltung und drei Schutzstufen (locker/standard/streng). Alle Schreibvorgänge laufen über den root-action-Kanal; nft wird nie im Plugin-Prozess ausgeführt.",
+    "detail": "docs/DETAIL.de.md"
+  }
+}
