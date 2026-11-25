@@ -92,7 +92,7 @@ func NormalizeLevel(raw string) (string, *pluginapi.Error) {
 	case LevelLoose, LevelStandard, LevelStrict:
 		return value, nil
 	}
-	return "", invalid("level=" + raw + " 非法，可选：loose / standard / strict（不传按 standard）")
+	return "", invalid("level=" + raw + " 非法；请传 loose / standard / strict 之一（不传按 standard）")
 }
 
 // LevelRuleCountFor 返回给定等级的内置规则条数（回读校验用）。
