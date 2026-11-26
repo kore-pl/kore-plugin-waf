@@ -107,7 +107,7 @@ func decodeOptional(raw json.RawMessage, target any) *pluginapi.Error {
 func decodeStrict(raw json.RawMessage, target any) *pluginapi.Error {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
-		return invalid("缺少必填参数对象")
+		return invalid("请传入参数对象 params（不能为空或 null）")
 	}
 	if trimmed[0] != '{' {
 		return invalid("params 必须是 JSON 对象")
