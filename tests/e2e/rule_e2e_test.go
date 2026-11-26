@@ -253,6 +253,20 @@ func TestRuleAddToggleRemoveAgainstRealNft(t *testing.T) {
 	if _, present := findRule(builtinOn.Chain, "ban-ipv4"); !present {
 		t.Fatal("内置规则 toggle on 后未恢复")
 	}
+
+	// 12) 回归（0.5.4）：步骤 9 已 remove 的自定义规则，经过步骤 11 的内置规则 toggle
+	//     off/on（会触发 rebuildChain 从 registry 重放自定义规则）后不得复活。
+	//     独立 nft -j 回读，不看插件自己的 chain 回读，避免自证循环。
+	if got := nftRuleHandles(t, "block-e2e"); len(got) != 0 {
+		t.Fatalf("回归失败：remove 后内置 toggle 触发 rebuildChain，已删规则 block-e2e 复活（独立 nft handle=%v）", got)
+	}
+	if _, present := findRule(builtinOn.Chain, "block-e2e"); present {
+		t.Fatal("回归失败：remove 后内置 toggle，插件回读 chain 里又出现 block-e2e")
+	}
+	// 显式 remove 真删 registry：再 toggle on 该自定义规则应报 E_INVALID（未知自定义规则）。
+	if _, perr := h.Call("waf.rule.toggle", json.RawMessage(`{"name":"block-e2e","enabled":true}`)); perr == nil || perr.Code != "E_INVALID" {
+		t.Fatalf("已 remove 的自定义规则再 toggle on 应 E_INVALID，实际 %+v", perr)
+	}
 }
 
 // TestRuleAddRejectsInjectionOnRealNft 证明「受控匹配器白名单」在真实通道上生效：

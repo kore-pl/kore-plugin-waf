@@ -1,6 +1,6 @@
 {
   "id": "waf",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "protocol": "kore.plugin.v1",
   "requires_kore": ">=0.1.0 <0.2.0",
   "capabilities": [

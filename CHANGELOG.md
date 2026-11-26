@@ -1,3 +1,11 @@
+## 0.5.4 — 2026-11-26
+
+### 修复（安全正确性 · 规则复活）
+
+- **显式 `waf.rule.remove` 真删 registry**：此前 `applyRuleRemove` 只删 nft 数据面规则、保留进程内 registry 条目，用户删除自定义规则后再启停任意内置规则会触发 `rebuildChain` 从 registry 重放，把已删规则重新装回（防护策略与用户意图不符）。现按现成形参分流：显式 remove 成功后 `forgetCustom(name)` 清 registry（之后 `rule.toggle enabled=true` 报 `E_INVALID` 未知自定义规则）；内置规则的 toggle off 仍保留 registry，`toggle on` 可原 expr 恢复。
+- **回归断言**：`tests/e2e/rule_e2e_test.go` 在 remove→内置 toggle off/on 后，用独立 `nft -j` 回读断言链里不含已删规则，并断言再次 toggle on 返回 `E_INVALID`。真机（私有 netns + nftables 1.1.6）修复前复现复活、修复后不复活均有证据。
+- 版本 bump 原因：二进制行为变更会改变 dist 包 sha；同一 `id@version` 只允许一个 sha（RELEASE §1），按 patch 递增。
+
 ## 0.5.3 — 2026-11-26
 
 ### 修复（文案 / 易用性）
